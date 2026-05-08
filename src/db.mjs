@@ -14,9 +14,67 @@ export const pool = new Pool({
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+async function ensureColumn(table, column, definition) {
+  await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
+}
+
 export async function initDb() {
+  console.log('[DB] Checking database schema...');
+
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  await pool.query(sql);
+
+  try {
+    await pool.query(sql);
+  } catch (err) {
+    console.error('[DB] schema.sql failed, running emergency migrations...', err.message);
+  }
+
+  // Emergency migrations. Railway can keep an old PostgreSQL database between deploys,
+  // and CREATE TABLE IF NOT EXISTS does not add columns to existing tables.
+  await ensureColumn('users', 'foxes', 'NUMERIC NOT NULL DEFAULT 25000');
+  await ensureColumn('users', 'crystals', 'NUMERIC NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'bank', 'NUMERIC NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'xp', 'INT NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'level', 'INT NOT NULL DEFAULT 1');
+  await ensureColumn('users', 'energy', 'INT NOT NULL DEFAULT 10');
+  await ensureColumn('users', 'vip_level', 'INT NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'vip_until', 'TIMESTAMP');
+  await ensureColumn('users', 'is_banned', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await ensureColumn('users', 'last_bonus_at', 'TIMESTAMP');
+  await ensureColumn('users', 'last_work_at', 'TIMESTAMP');
+  await ensureColumn('users', 'last_luck_at', 'TIMESTAMP');
+  await ensureColumn('users', 'garden_watered_at', 'TIMESTAMP');
+  await ensureColumn('users', 'income_boost_until', 'TIMESTAMP');
+  await ensureColumn('users', 'case_luck_until', 'TIMESTAMP');
+  await ensureColumn('users', 'luck_charges', 'INT NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'pass_premium', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await ensureColumn('users', 'pass_xp', 'INT NOT NULL DEFAULT 0');
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='balance') THEN
+        EXECUTE 'UPDATE users SET foxes = COALESCE(NULLIF(foxes, 25000), balance, foxes)';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='bcoins') THEN
+        EXECUTE 'UPDATE users SET crystals = COALESCE(NULLIF(crystals, 0), bcoins, crystals)';
+      END IF;
+    END $$;
+  `);
+
+  await ensureColumn('facilities', 'video_cards', 'INT NOT NULL DEFAULT 0');
+  await ensureColumn('facilities', 'max_video_cards', 'INT NOT NULL DEFAULT 10');
+  await ensureColumn('facilities', 'tax_debt', 'NUMERIC NOT NULL DEFAULT 0');
+  await ensureColumn('facilities', 'tax_limit', 'NUMERIC NOT NULL DEFAULT 5000000');
+  await ensureColumn('facilities', 'account', 'NUMERIC NOT NULL DEFAULT 0');
+  await ensureColumn('facilities', 'last_tick_at', 'TIMESTAMP');
+  await ensureColumn('facilities', 'territory_m2', 'INT NOT NULL DEFAULT 120');
+  await ensureColumn('facilities', 'business_m2', 'INT NOT NULL DEFAULT 120');
+  await ensureColumn('facilities', 'trees_count', 'INT NOT NULL DEFAULT 10');
+  await ensureColumn('facilities', 'water', 'INT NOT NULL DEFAULT 100');
+  await ensureColumn('facilities', 'max_water', 'INT NOT NULL DEFAULT 100');
+
+  console.log('[DB] Database schema is ready');
 }
 
 export async function requireUser(ctx) {

@@ -1,6 +1,6 @@
 {
   "name": "blackfoxgame-bot",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "description": "BlackFox Game Telegram economic entertainment bot",
   "scripts": {

@@ -43,7 +43,25 @@ function admin(ctx){ return adminIds.has(ctx.from.id); }
 async function getUserByAny(raw){ const s=String(raw||'').replace('@','').trim(); if(/^\d+$/.test(s)){ const r=await pool.query('SELECT * FROM users WHERE tg_id=$1 OR id=$1',[Number(s)]); return r.rows[0]; } const r=await pool.query('SELECT * FROM users WHERE LOWER(username)=LOWER($1)',[s]); return r.rows[0]; }
 async function addItem(userId,key,title,amount=1,meta={}){ await pool.query(`INSERT INTO inventory_items(user_id,item_key,title,amount,meta) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,item_key) DO UPDATE SET amount=inventory_items.amount+EXCLUDED.amount,title=EXCLUDED.title`,[userId,key,title,amount,JSON.stringify(meta)]); }
 async function takeItem(userId,key,amount=1){ const r=await pool.query('UPDATE inventory_items SET amount=amount-$1 WHERE user_id=$2 AND item_key=$3 AND amount>=$1 RETURNING *',[amount,userId,key]); return !!r.rows[0]; }
-async function addXp(userId, amount){ const r=await pool.query('UPDATE users SET xp=xp+$1, pass_xp=pass_xp+$1 WHERE id=$2 RETURNING xp, level',[amount,userId]); const u=r.rows[0]; const lvl=Math.floor(Number(u.xp)/1000)+1; if(lvl>Number(u.level)) await pool.query('UPDATE users SET level=$1, foxes=foxes+$2, crystals=crystals+1 WHERE id=$3',[lvl,lvl*10000,userId]); }
+async function addXp(userId, amount){
+  try {
+    const r=await pool.query('UPDATE users SET xp=xp+$1, pass_xp=pass_xp+$1 WHERE id=$2 RETURNING xp, level',[amount,userId]);
+    const u=r.rows[0];
+    const lvl=Math.floor(Number(u.xp)/1000)+1;
+    if(lvl>Number(u.level)) await pool.query('UPDATE users SET level=$1, foxes=foxes+$2, crystals=crystals+1 WHERE id=$3',[lvl,lvl*10000,userId]);
+  } catch (err) {
+    if (err?.code === '42703') {
+      console.warn('[DB] Missing column during addXp, running initDb and retrying once...');
+      await initDb();
+      const r=await pool.query('UPDATE users SET xp=xp+$1, pass_xp=pass_xp+$1 WHERE id=$2 RETURNING xp, level',[amount,userId]);
+      const u=r.rows[0];
+      const lvl=Math.floor(Number(u.xp)/1000)+1;
+      if(lvl>Number(u.level)) await pool.query('UPDATE users SET level=$1, foxes=foxes+$2, crystals=crystals+1 WHERE id=$3',[lvl,lvl*10000,userId]);
+      return;
+    }
+    throw err;
+  }
+}
 async function daily(userId){ await pool.query('INSERT INTO daily_progress(user_id,day) VALUES($1,CURRENT_DATE) ON CONFLICT DO NOTHING',[userId]); const r=await pool.query('SELECT * FROM daily_progress WHERE user_id=$1 AND day=CURRENT_DATE',[userId]); return r.rows[0]; }
 async function markDaily(userId, col, inc=false){ await daily(userId); if(inc) await pool.query(`UPDATE daily_progress SET ${col}=${col}+1 WHERE user_id=$1 AND day=CURRENT_DATE`,[userId]); else await pool.query(`UPDATE daily_progress SET ${col}=TRUE WHERE user_id=$1 AND day=CURRENT_DATE`,[userId]); }
 async function clanBonus(userId){ const r=await pool.query('SELECT c.level FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[userId]); return r.rows[0] ? 1 + Number(r.rows[0].level)*0.02 : 1; }
