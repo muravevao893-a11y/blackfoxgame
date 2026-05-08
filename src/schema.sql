@@ -1,0 +1,79 @@
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  tg_id BIGINT UNIQUE NOT NULL,
+  username TEXT,
+  first_name TEXT,
+  foxes NUMERIC NOT NULL DEFAULT 25000,
+  crystals NUMERIC NOT NULL DEFAULT 0,
+  bank NUMERIC NOT NULL DEFAULT 0,
+  xp INT NOT NULL DEFAULT 0,
+  level INT NOT NULL DEFAULT 1,
+  energy INT NOT NULL DEFAULT 10,
+  vip_level INT NOT NULL DEFAULT 0,
+  referrer_id INT REFERENCES users(id),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  last_bonus_at TIMESTAMP,
+  last_work_at TIMESTAMP,
+  last_collect_at TIMESTAMP,
+  last_case_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id SERIAL PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  reward_foxes NUMERIC NOT NULL DEFAULT 0,
+  reward_crystals NUMERIC NOT NULL DEFAULT 0,
+  max_activations INT NOT NULL,
+  activations INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS promo_activations (
+  id SERIAL PRIMARY KEY,
+  promo_id INT NOT NULL REFERENCES promo_codes(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  activated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(promo_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS inventory (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  item_type TEXT NOT NULL,
+  item_id INT NOT NULL,
+  title TEXT NOT NULL,
+  income NUMERIC NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS clans (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  bank NUMERIC NOT NULL DEFAULT 0,
+  xp INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS clan_members (
+  id SERIAL PRIMARY KEY,
+  clan_id INT NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'member',
+  joined_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id SERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  amount NUMERIC NOT NULL DEFAULT 0,
+  meta TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(LOWER(username));
+CREATE INDEX IF NOT EXISTS idx_users_foxes ON users(foxes DESC);
+CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id);
