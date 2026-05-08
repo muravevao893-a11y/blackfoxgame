@@ -121,6 +121,24 @@ function farmButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('�
 function gardenButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:garden'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:garden')],[Markup.button.callback('⬆️ Купить дерево','fac_tree:garden'),Markup.button.callback('💦 Полить сад','fac_water:garden')]]); }
 function businessButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:business'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:business')],[Markup.button.callback('⬆️ Увеличить территорию','fac_territory:business'),Markup.button.callback('🆙 Увеличить бизнес','fac_upgrade:business')]]); }
 
+function buildButtons(kind){
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🏗 Построить', `fac_build:${kind}`)],
+    [Markup.button.callback('👤 Профиль', 'menu_profile'), Markup.button.callback('💰 Баланс', 'menu_balance')]
+  ]);
+}
+
+function facilityKindFromBuildText(text){
+  const t = String(text || '').toLowerCase().trim().replace(/ё/g, 'е');
+  if (/^(построить|купить|создать)\s+(майнинг\s*)?ферм[уа]$/.test(t)) return 'farm';
+  if (/^(построить|купить|создать)\s+бизнес$/.test(t)) return 'business';
+  if (/^(построить|купить|создать)\s+сад$/.test(t)) return 'garden';
+  if (/^(построить|купить|создать)\s+генератор$/.test(t)) return 'generator';
+  if (/^(построить|купить|создать)\s+карьер$/.test(t)) return 'quarry';
+  if (/^(построить|купить|создать)\s+участок$/.test(t)) return 'tree';
+  return null;
+}
+
 function isPrivate(ctx){ return ctx.chat?.type === 'private'; }
 function isGroup(ctx){ return ['group','supergroup'].includes(ctx.chat?.type); }
 function groupKeyboard(){
@@ -282,8 +300,87 @@ bot.hears(/^кейсы$/i, sendCases);
 bot.hears(/^купить кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(100,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const cost=c.price*count; if(Number(u.foxes)<cost) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('INSERT INTO user_cases(user_id,case_id,amount) VALUES($1,$2,$3) ON CONFLICT(user_id,case_id) DO UPDATE SET amount=user_cases.amount+EXCLUDED.amount',[u.id,c.id,count]); await addItem(u.id,c.key,c.title,count); await ctx.reply(`🛒 Куплено: ${c.title} x${count}`); });
 bot.hears(/^открыть кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(20,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const take=await pool.query('UPDATE user_cases SET amount=amount-$1 WHERE user_id=$2 AND case_id=$3 AND amount>=$1 RETURNING amount',[count,u.id,c.id]); if(!take.rows[0]) return ctx.reply('❌ У тебя нет столько кейсов.'); await takeItem(u.id,c.key,count); let fox=0, cr=0, text=[]; const luck=u.case_luck_until && new Date(u.case_luck_until)>now() ? .03 : 0; for(let i=0;i<count;i++){ let win=rnd(c.min,c.max); if(Math.random()<c.jackpot+luck) win*=5; fox+=win; if(Math.random()<c.gemChance+luck){ cr+=c.gems; } text.push(`+${cash(win)}`); } await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3',[fox,cr,u.id]); await addXp(u.id,40*count); await markDaily(u.id,'case_done'); await ctx.reply(`🔐 Открыто ${c.title} x${count}\n\n${text.slice(0,10).join('\n')}${text.length>10?'\n...':''}\n\nИтого: ${m(fox)}${cr?` + ${g(cr)}`:''}`); });
 
-async function showFacility(ctx,kind){ const u=await requireUser(ctx); const fdef=facilities[kind]; let r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); if(!r.rows[0]) return ctx.reply(`${fdef.icon} ${fdef.title}\n\nУ тебя пока нет постройки.\nКоманда: ${fdef.build}\nЦена: ${m(fdef.price)}`); const f=r.rows[0]; const mult=(u.income_boost_until&&new Date(u.income_boost_until)>now()?1.25:1)*(1+(u.vip_level||0)*.1)*await clanBonus(u.id); const income=Math.floor(Number(f.income)*Number(f.level)*mult); let txt=`${fdef.icon} ${fdef.title}\n\n🥐 Доход: ${cash(income)} / ${fdef.interval}ч\n📈 Уровень: ${f.level}\n🦅 Налоги: ${cash(f.tax_debt)} / ${cash(f.tax_limit)}\n📦 На счету: ${cash(f.account)}`; if(kind==='farm') txt+=`\n🎬 Видеокарты: ${f.video_cards}/${f.max_video_cards}\n🆙 Цена видеокарты: ${cash(150000+f.video_cards*50000)}`; if(kind==='business') txt+=`\n⬆️ Территория: ${f.territory_m2} м²\n🆙 Бизнес: ${f.business_m2} м²`; if(kind==='garden') txt+=`\n🌳 Деревья: ${f.trees_count}\n💦 Воды: ${f.water}/${f.max_water}`; const kb=kind==='farm'?farmButtons():kind==='garden'?gardenButtons():kind==='business'?businessButtons():Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль',`fac_collect:${kind}`),Markup.button.callback('🦅 Оплатить налоги',`fac_tax:${kind}`)],[Markup.button.callback('⬆️ Улучшить',`fac_upgrade:${kind}`)]]); await ctx.reply(txt,kb); }
-for(const [kind,d] of Object.entries(facilities)){ bot.hears(new RegExp(`^(${d.aliases.join('|')})$`,'i'), ctx=>showFacility(ctx,kind)); bot.hears(new RegExp(`^${d.build}$`,'i'), async ctx=>{ const u=await requireUser(ctx); const exists=await pool.query('SELECT id FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); if(exists.rows[0]) return ctx.reply('✅ Уже построено.'); if(Number(u.foxes)<d.price) return ctx.reply(`❌ Нужно ${m(d.price)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[d.price,u.id]); await pool.query('INSERT INTO facilities(user_id,kind,title,income,last_collect_at,last_tick_at,video_cards) VALUES($1,$2,$3,$4,NOW(),NOW(),$5)',[u.id,kind,d.title,d.income,kind==='farm'?1:0]); await addXp(u.id,120); await ctx.reply(`🏗 Построено: ${d.title}`); }); bot.hears(new RegExp(`^продать ${kind==='farm'?'ферму':kind==='business'?'бизнес':d.title.toLowerCase()}$`,'i'), ctx=>ctx.reply('💰 Продажа временно недоступна.')); }
+async function buildFacility(ctx, kind){
+  const d = facilities[kind];
+  if(!d) return ctx.reply('❌ Такой постройки нет.');
+
+  const u = await requireUser(ctx);
+  const exists = await pool.query('SELECT id FROM facilities WHERE user_id=$1 AND kind=$2', [u.id, kind]);
+  if (exists.rows[0]) return ctx.reply(`✅ ${d.title} уже построен(а). Напиши «${d.aliases[0]}», чтобы открыть карточку.`);
+
+  if (Number(u.foxes) < d.price) {
+    return ctx.reply(
+      `❌ <b>Не хватает Фоксов</b>\n\n` +
+      `${d.icon} Постройка: <b>${d.title}</b>\n` +
+      `💰 Цена: <b>${m(d.price)}</b>\n` +
+      `👛 У тебя: <b>${m(u.foxes)}</b>`,
+      { parse_mode:'HTML' }
+    );
+  }
+
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [d.price, u.id]);
+  await pool.query(
+    'INSERT INTO facilities(user_id,kind,title,income,last_collect_at,last_tick_at,video_cards,trees_count) VALUES($1,$2,$3,$4,NOW(),NOW(),$5,$6)',
+    [u.id, kind, d.title, d.income, kind === 'farm' ? 1 : 0, kind === 'garden' ? 10 : 0]
+  );
+  await addXp(u.id, 120);
+
+  await ctx.reply(
+    `🏗 <b>Постройка создана!</b>\n\n` +
+    `${d.icon} <b>${d.title}</b> теперь работает на тебя.\n` +
+    `💰 Списано: <b>${m(d.price)}</b>\n` +
+    `⚡ Опыт: <b>+120 XP</b>\n\n` +
+    `Открой карточку командой: <b>${d.aliases[0]}</b>`,
+    { parse_mode:'HTML' }
+  );
+
+  return showFacility(ctx, kind);
+}
+
+async function showFacility(ctx,kind){
+  const u=await requireUser(ctx);
+  const fdef=facilities[kind];
+  let r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]);
+
+  if(!r.rows[0]) {
+    return ctx.reply(
+      `${fdef.icon} <b>${fdef.title}</b>\n\n` +
+      `У тебя пока нет этой постройки.\n\n` +
+      `🏗 Команда: <b>${fdef.build}</b>\n` +
+      `💰 Цена: <b>${m(fdef.price)}</b>\n\n` +
+      `Нажми кнопку ниже или напиши: <b>${fdef.build}</b>`,
+      { parse_mode:'HTML', ...buildButtons(kind) }
+    );
+  }
+
+  const f=r.rows[0];
+  const mult=(u.income_boost_until&&new Date(u.income_boost_until)>now()?1.25:1)*(1+(u.vip_level||0)*.1)*await clanBonus(u.id);
+  const income=Math.floor(Number(f.income)*Number(f.level)*mult);
+  let txt=`${fdef.icon} <b>${fdef.title}</b>\n\n🥐 Доход: <b>${cash(income)}</b> / ${fdef.interval}ч\n📈 Уровень: <b>${f.level}</b>\n🦅 Налоги: <b>${cash(f.tax_debt)}</b> / ${cash(f.tax_limit)}\n📦 На счету: <b>${cash(f.account)}</b>`;
+  if(kind==='farm') txt+=`\n🎬 Видеокарты: <b>${f.video_cards}/${f.max_video_cards}</b>\n🆙 Цена видеокарты: <b>${cash(150000+f.video_cards*50000)}</b>`;
+  if(kind==='business') txt+=`\n⬆️ Территория: <b>${f.territory_m2} м²</b>\n🆙 Бизнес: <b>${f.business_m2} м²</b>`;
+  if(kind==='garden') txt+=`\n🌳 Деревья: <b>${f.trees_count}</b>\n💦 Воды: <b>${f.water}/${f.max_water}</b>`;
+  const kb=kind==='farm'?farmButtons():kind==='garden'?gardenButtons():kind==='business'?businessButtons():Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль',`fac_collect:${kind}`),Markup.button.callback('🦅 Оплатить налоги',`fac_tax:${kind}`)],[Markup.button.callback('⬆️ Улучшить',`fac_upgrade:${kind}`)]]);
+  await ctx.reply(txt,{ parse_mode:'HTML', ...kb });
+}
+
+bot.action(/^fac_build:(\w+)$/, async ctx=>{
+  await ctx.answerCbQuery().catch(()=>{});
+  return buildFacility(ctx, ctx.match[1]);
+});
+
+// Надежный роутер построек: работает и в ЛС, и в группах, и с вариантами «купить/создать».
+bot.hears(/^(построить|купить|создать)\s+(.+)$/i, async ctx=>{
+  const kind = facilityKindFromBuildText(ctx.message?.text);
+  if(!kind) return;
+  return buildFacility(ctx, kind);
+});
+
+for(const [kind,d] of Object.entries(facilities)){
+  bot.hears(new RegExp(`^(${d.aliases.join('|')})$`,'i'), ctx=>showFacility(ctx,kind));
+  bot.hears(new RegExp(`^${d.build}$`,'i'), ctx=>buildFacility(ctx,kind));
+  bot.hears(new RegExp(`^продать ${kind==='farm'?'ферму':kind==='business'?'бизнес':d.title.toLowerCase()}$`,'i'), ctx=>ctx.reply('💰 Продажа временно недоступна.'));
+}
 async function collectFacility(ctx,kind){ const u=await requireUser(ctx); const d=facilities[kind]; const r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); const f=r.rows[0]; if(!f) return ctx.reply(`❌ Сначала: ${d.build}`); const last=f.last_collect_at?new Date(f.last_collect_at):new Date(0); if(now()-last<d.interval*3600000) return ctx.reply(`⏳ Прибыль можно собирать раз в ${d.interval}ч.`); const mult=(u.income_boost_until&&new Date(u.income_boost_until)>now()?1.25:1)*(1+(u.vip_level||0)*.1)*await clanBonus(u.id); let inc=Math.floor(Number(f.income)*Number(f.level)*mult); if(kind==='farm') inc*=Math.max(1,Number(f.video_cards)); if(kind==='garden') inc*=Math.max(1,Number(f.trees_count)/10); const tax=Math.floor(inc*.08); if(Number(f.tax_debt)+tax>Number(f.tax_limit)) return ctx.reply('🦅 Сначала оплати налоги, лимит переполнен.'); await pool.query('UPDATE facilities SET last_collect_at=NOW(), account=account+$1, tax_debt=tax_debt+$2 WHERE id=$3',[inc,tax,f.id]); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[inc,u.id]); await markDaily(u.id,'collect_done'); await addXp(u.id,80); await ctx.reply(`💰 Собрано: ${m(inc)}\n🦅 Налог начислен: ${m(tax)}`); }
 bot.action(/^fac_collect:(\w+)$/, ctx=>collectFacility(ctx,ctx.match[1]));
 bot.action(/^fac_tax:(\w+)$/, async ctx=>{ const u=await requireUser(ctx); const f=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,ctx.match[1]]); if(!f.rows[0]) return ctx.answerCbQuery('Нет постройки'); const debt=Number(f.rows[0].tax_debt); if(debt<=0) return ctx.answerCbQuery('Налогов нет'); if(Number(u.foxes)<debt) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[debt,u.id]); await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1',[f.rows[0].id]); await ctx.reply(`🦅 Налоги оплачены: ${m(debt)}`); });
