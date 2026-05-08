@@ -172,3 +172,17 @@ Telegram по умолчанию включает Privacy Mode. С ним бот
 7. Удали бота из группы и добавь заново.
 
 Даже с включенным Privacy Mode slash-команды в группах уже работают.
+
+
+## Railway / Telegram 409 fix
+
+Если в логах ошибка `409: Conflict: terminated by other getUpdates request`, включи webhook-режим:
+
+1. В Railway открой сервис бота → Settings → Networking → сгенерируй Public Domain.
+2. В Variables добавь:
+   - `WEBHOOK_URL=https://твой-домен.up.railway.app`
+   - `BOT_TOKEN=...`
+   - `DATABASE_URL=${{Postgres.DATABASE_URL}}`
+3. Redeploy.
+
+Когда `WEBHOOK_URL` задан, бот не использует polling/getUpdates, поэтому конфликт 409 исчезает.

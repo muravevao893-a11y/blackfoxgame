@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { Telegraf, Markup } from 'telegraf';
+import express from 'express';
 import { initDb, pool, requireUser, logTx } from './db.mjs';
 
 dotenv.config();
@@ -48,6 +49,41 @@ async function markDaily(userId, col, inc=false){ await daily(userId); if(inc) a
 async function clanBonus(userId){ const r=await pool.query('SELECT c.level FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[userId]); return r.rows[0] ? 1 + Number(r.rows[0].level)*0.02 : 1; }
 async function ensureNotSpam(ctx,next){ if(!ctx.from) return next(); const t=Date.now(), k=ctx.from.id; const last=localSpam.get(k)||0; if(t-last<500) return; localSpam.set(k,t); const user=await requireUser(ctx); if(user?.is_banned) return ctx.reply('🚫 Ты заблокирован в боте.'); return next(); }
 bot.use(ensureNotSpam);
+
+// Groups: Telegram Privacy Mode hides ordinary text unless disabled in BotFather.
+// This middleware makes group usage nicer when users mention the bot or use /русские команды.
+let botUsernameCache = null;
+async function botUsername(ctx){
+  if(!botUsernameCache){
+    try{ botUsernameCache = (await ctx.telegram.getMe()).username; }catch{ botUsernameCache = ''; }
+  }
+  return botUsernameCache;
+}
+async function normalizeGroupText(ctx,next){
+  if(!ctx.message?.text || !isGroup(ctx)) return next();
+  const username = await botUsername(ctx);
+  let text = ctx.message.text.trim().replace(/\s+/g,' ');
+
+  // @BlackFoxBot баланс  |  баланс @BlackFoxBot
+  if(username){
+    const mention = new RegExp(`@${username}\\b`, 'ig');
+    text = text.replace(mention, '').trim();
+  }
+
+  // friendly prefixes: бот баланс / бфг баланс / blackfox баланс
+  text = text.replace(/^(бот|бфг|bfg|blackfox|black fox)[,\s]+/i, '').trim();
+
+  // /профиль, /баланс, /ферма etc. Telegram delivers slash messages even with Privacy Mode.
+  const ruSlash = text.match(/^\/(профиль|баланс|ферма|сад|бизнес|кейсы|клан|казино)(?:\s+(.+))?$/i);
+  if(ruSlash){
+    text = `${ruSlash[1]}${ruSlash[2] ? ' ' + ruSlash[2] : ''}`;
+  }
+
+  ctx.state.originalText = ctx.message.text;
+  ctx.message.text = text;
+  return next();
+}
+bot.use(normalizeGroupText);
 
 function mainKeyboard(){ return Markup.keyboard([['профиль','баланс','задания'],['казино инфо','кейсы','бизнес'],['ферма','сад','клан'],['инвентарь','рынок','vip']]).resize(); }
 function farmButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:farm'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:farm')],[Markup.button.callback('⬆️ Улучшить ферму','fac_upgrade:farm'),Markup.button.callback('🔼 Купить видеокарту','fac_card:farm')]]); }
@@ -98,6 +134,21 @@ async function sendTop(ctx, title='🏆 Топ игроков'){
   const r=await pool.query('SELECT username,first_name,foxes FROM users ORDER BY foxes DESC LIMIT 10');
   await ctx.reply(`<b>${title}</b>\n\n`+r.rows.map((u,i)=>`${i+1}. ${u.username?'@'+u.username:u.first_name} — <b>${m(u.foxes)}</b>`).join('\n'), { parse_mode:'HTML' });
 }
+
+async function sendCases(ctx){
+  const u=await requireUser(ctx);
+  const inv=await pool.query('SELECT * FROM user_cases WHERE user_id=$1',[u.id]);
+  const owned=id=>inv.rows.find(x=>x.case_id===id)?.amount||0;
+  await ctx.reply('📦 <b>Кейсы</b>\n\n'+cases.map(c=>`${c.id}. <b>${c.title}</b>\nЦена: ${m(c.price)} | У тебя: ${owned(c.id)}`).join('\n\n')+'\n\n🛒 Купить: <code>купить кейс 1 3</code>\n🔐 Открыть: <code>открыть кейс 1 3</code>', { parse_mode:'HTML' });
+}
+async function sendClan(ctx){
+  const u=await requireUser(ctx);
+  const r=await pool.query('SELECT c.*,m.role FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[u.id]);
+  if(!r.rows[0]) return ctx.reply('🏰 <b>Клан</b>\n\nТы пока не в клане.\n\nСоздать: <code>клан создать Название</code>\nВступить: <code>клан вступить ID</code>\nСтоимость создания: <b>1.000.000 Фоксов</b>', { parse_mode:'HTML' });
+  const c=r.rows[0];
+  await ctx.reply(`🏰 <b>Клан ${c.title}</b>\n\nID: <code>${c.id}</code>\nУровень: <b>${c.level}</b>\nКазна: <b>${m(c.bank)}</b>\nБонус дохода: <b>+${c.level*2}%</b>\nТвоя роль: <b>${c.role}</b>\n\n<code>клан донат 10000</code>\n<code>клан улучшить</code>\n<code>клан участники</code>`, { parse_mode:'HTML' });
+}
+
 async function runSlashCasino(ctx){
   const u=await requireUser(ctx);
   const raw=cleanCommandText(ctx) || 'инфо';
@@ -115,6 +166,11 @@ bot.command(['balance','bal'], sendBalance);
 bot.command(['top','leaders'], ctx=>sendTop(ctx));
 bot.command(['chat_top'], ctx=>sendTop(ctx,'🏆 Топ чата'));
 bot.command(['casino','kazik'], runSlashCasino);
+bot.command(['business','biz'], ctx=>showFacility(ctx,'business'));
+bot.command(['farm','ferma','mining'], ctx=>showFacility(ctx,'farm'));
+bot.command(['garden','sad'], ctx=>showFacility(ctx,'garden'));
+bot.command(['cases','case'], sendCases);
+bot.command(['clan','klan'], sendClan);
 bot.action('group_help', sendGroupHelp);
 bot.action('group_top', ctx=>sendTop(ctx,'🏆 Топ чата'));
 bot.action('menu_profile', sendProfile);
@@ -152,7 +208,7 @@ function minesKb(s){ const rows=[]; for(let i=0;i<9;i+=3){ rows.push([0,1,2].map
 bot.action(/^mine:(.+):(\d+)$/, async ctx=>{ const u=await requireUser(ctx); const s=JSON.parse(Buffer.from(ctx.match[1],'base64').toString()); const k=Number(ctx.match[2]); if(s.opened.includes(k)) return ctx.answerCbQuery('Уже открыто'); if(k===s.bomb){ await markDaily(u.id,'casino_count',true); await ctx.editMessageText(`💥 Бомба! Ты потерял ${m(s.bet)}`); return; } s.opened.push(k); await ctx.editMessageText(`💣 Мины\nОткрыто: ${s.opened.length}\nТекущий выигрыш: ${m(Math.floor(s.bet*(1+s.opened.length*.35)))}`, minesKb(s)); });
 bot.action(/^minecash:(.+)$/, async ctx=>{ const u=await requireUser(ctx); const s=JSON.parse(Buffer.from(ctx.match[1],'base64').toString()); if(!s.opened.length) return ctx.answerCbQuery('Сначала открой клетку'); const win=Math.floor(s.bet*(1+s.opened.length*.35)); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[win,u.id]); await markDaily(u.id,'casino_count',true); await addXp(u.id,50); await ctx.editMessageText(`💰 Забрано: ${m(win)}`); });
 
-bot.hears(/^кейсы$/i, async ctx=>{ const u=await requireUser(ctx); const inv=await pool.query('SELECT * FROM user_cases WHERE user_id=$1',[u.id]); const owned=id=>inv.rows.find(x=>x.case_id===id)?.amount||0; await ctx.reply('📦 Кейсы\n\n'+cases.map(c=>`${c.id}. ${c.title}\nЦена: ${m(c.price)} | У тебя: ${owned(c.id)}`).join('\n\n')+'\n\nкупить кейс 1 3\nоткрыть кейс 1 3'); });
+bot.hears(/^кейсы$/i, sendCases);
 bot.hears(/^купить кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(100,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const cost=c.price*count; if(Number(u.foxes)<cost) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('INSERT INTO user_cases(user_id,case_id,amount) VALUES($1,$2,$3) ON CONFLICT(user_id,case_id) DO UPDATE SET amount=user_cases.amount+EXCLUDED.amount',[u.id,c.id,count]); await addItem(u.id,c.key,c.title,count); await ctx.reply(`🛒 Куплено: ${c.title} x${count}`); });
 bot.hears(/^открыть кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(20,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const take=await pool.query('UPDATE user_cases SET amount=amount-$1 WHERE user_id=$2 AND case_id=$3 AND amount>=$1 RETURNING amount',[count,u.id,c.id]); if(!take.rows[0]) return ctx.reply('❌ У тебя нет столько кейсов.'); await takeItem(u.id,c.key,count); let fox=0, cr=0, text=[]; const luck=u.case_luck_until && new Date(u.case_luck_until)>now() ? .03 : 0; for(let i=0;i<count;i++){ let win=rnd(c.min,c.max); if(Math.random()<c.jackpot+luck) win*=5; fox+=win; if(Math.random()<c.gemChance+luck){ cr+=c.gems; } text.push(`+${cash(win)}`); } await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3',[fox,cr,u.id]); await addXp(u.id,40*count); await markDaily(u.id,'case_done'); await ctx.reply(`🔐 Открыто ${c.title} x${count}\n\n${text.slice(0,10).join('\n')}${text.length>10?'\n...':''}\n\nИтого: ${m(fox)}${cr?` + ${g(cr)}`:''}`); });
 
@@ -176,7 +232,7 @@ bot.hears(/^рынок$/i, async ctx=>{ const r=await pool.query("SELECT * FROM 
 bot.hears(/^рынок выставить (\S+)\s+(\d+)\s+(\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const [key,amount,price]=[ctx.match[1],Number(ctx.match[2]),Number(ctx.match[3])]; const item=(await pool.query('SELECT * FROM inventory_items WHERE user_id=$1 AND item_key=$2 AND amount>=$3',[u.id,key,amount])).rows[0]; if(!item) return ctx.reply('❌ Нет такого предмета/количества.'); await takeItem(u.id,key,amount); await pool.query('INSERT INTO market_lots(seller_user_id,item_key,title,amount,price) VALUES($1,$2,$3,$4,$5)',[u.id,key,item.title,amount,price]); await ctx.reply('🛒 Лот выставлен.'); });
 bot.hears(/^рынок купить (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const lot=(await pool.query("SELECT * FROM market_lots WHERE id=$1 AND status='active'",[Number(ctx.match[1])])).rows[0]; if(!lot) return ctx.reply('❌ Лот не найден.'); if(Number(u.foxes)<Number(lot.price)) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('BEGIN'); try{ await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[lot.price,u.id]); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[lot.price,lot.seller_user_id]); await addItem(u.id,lot.item_key,lot.title,lot.amount); await pool.query("UPDATE market_lots SET status='sold', sold_at=NOW() WHERE id=$1",[lot.id]); await pool.query('COMMIT'); await ctx.reply('✅ Куплено.'); }catch(e){ await pool.query('ROLLBACK'); throw e; } });
 
-bot.hears(/^клан$/i, async ctx=>{ const u=await requireUser(ctx); const r=await pool.query('SELECT c.*,m.role FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[u.id]); if(!r.rows[0]) return ctx.reply('🏰 Ты не в клане.\n\nклан создать Название\nклан вступить ID'); const c=r.rows[0]; await ctx.reply(`🏰 Клан ${c.title}\n\nID: ${c.id}\nУровень: ${c.level}\nКазна: ${m(c.bank)}\nБонус дохода: +${c.level*2}%\nТвоя роль: ${c.role}\n\nклан донат 10000\nклан улучшить\nклан участники`); });
+bot.hears(/^клан$/i, sendClan);
 bot.hears(/^клан создать (.+)$/i, async ctx=>{ const u=await requireUser(ctx); const has=await pool.query('SELECT id FROM clan_members WHERE user_id=$1',[u.id]); if(has.rows[0]) return ctx.reply('❌ Ты уже в клане.'); const cost=1000000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); const c=await pool.query('INSERT INTO clans(title,owner_user_id) VALUES($1,$2) RETURNING *',[ctx.match[1].slice(0,32),u.id]); await pool.query("INSERT INTO clan_members(clan_id,user_id,role) VALUES($1,$2,'owner')",[c.rows[0].id,u.id]); await ctx.reply(`🏰 Клан создан: ${c.rows[0].title}\nID: ${c.rows[0].id}`); });
 bot.hears(/^клан вступить (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const has=await pool.query('SELECT id FROM clan_members WHERE user_id=$1',[u.id]); if(has.rows[0]) return ctx.reply('❌ Ты уже в клане.'); const c=await pool.query('SELECT * FROM clans WHERE id=$1',[Number(ctx.match[1])]); if(!c.rows[0]) return ctx.reply('❌ Клан не найден.'); await pool.query('INSERT INTO clan_members(clan_id,user_id) VALUES($1,$2)',[c.rows[0].id,u.id]); await ctx.reply(`✅ Ты вступил в клан ${c.rows[0].title}`); });
 bot.hears(/^клан донат (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const amount=parseAmount(ctx.match[1],u); if(amount<1||Number(u.foxes)<amount) return ctx.reply('❌ Неверная сумма.'); const cm=await pool.query('SELECT * FROM clan_members WHERE user_id=$1',[u.id]); if(!cm.rows[0]) return ctx.reply('❌ Ты не в клане.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[amount,u.id]); await pool.query('UPDATE clans SET bank=bank+$1,xp=xp+$2 WHERE id=$3',[amount,Math.floor(amount/1000),cm.rows[0].clan_id]); await ctx.reply(`🏦 В казну отправлено: ${m(amount)}`); });
@@ -234,6 +290,11 @@ try{
     {command:'profile',description:'Мой профиль'},
     {command:'balance',description:'Баланс'},
     {command:'casino',description:'Казино: /casino 1000'},
+    {command:'business',description:'Мой бизнес'},
+    {command:'farm',description:'Моя ферма'},
+    {command:'garden',description:'Мой сад'},
+    {command:'cases',description:'Кейсы'},
+    {command:'clan',description:'Клан'},
     {command:'top',description:'Топ игроков'}
   ], { scope:{ type:'default' } });
   await bot.telegram.setMyCommands([
@@ -241,11 +302,49 @@ try{
     {command:'profile',description:'Профиль'},
     {command:'balance',description:'Баланс'},
     {command:'casino',description:'Казино'},
+    {command:'business',description:'Бизнес'},
+    {command:'farm',description:'Ферма'},
+    {command:'garden',description:'Сад'},
+    {command:'cases',description:'Кейсы'},
+    {command:'clan',description:'Клан'},
     {command:'top',description:'Топ игроков'},
     {command:'chat_top',description:'Топ чата'}
   ], { scope:{ type:'all_group_chats' } });
 }catch(e){ console.warn('setMyCommands failed:', e.message); }
-bot.launch({ dropPendingUpdates: true });
-console.log(`${BOT_NAME} mega pack started`);
+
+const PORT = Number(process.env.PORT || 3000);
+const WEBHOOK_PATH = process.env.WEBHOOK_PATH || `/telegram/${process.env.BOT_TOKEN}`;
+const rawWebhookUrl = process.env.WEBHOOK_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '');
+
+async function startBot(){
+  if(rawWebhookUrl){
+    const app = express();
+    app.get('/', (_, res) => res.send(`${BOT_NAME} is alive`));
+    app.get('/health', (_, res) => res.json({ ok:true, mode:'webhook' }));
+    app.use(bot.webhookCallback(WEBHOOK_PATH));
+
+    const fullWebhookUrl = `${rawWebhookUrl.replace(/\/$/, '')}${WEBHOOK_PATH}`;
+    await bot.telegram.setWebhook(fullWebhookUrl, { drop_pending_updates: true });
+
+    app.listen(PORT, () => {
+      console.log(`${BOT_NAME} started in WEBHOOK mode`);
+      console.log(`Webhook: ${fullWebhookUrl.replace(process.env.BOT_TOKEN, '***')}`);
+    });
+    return;
+  }
+
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(()=>{});
+  await bot.launch({ dropPendingUpdates: true });
+  console.log(`${BOT_NAME} started in POLLING mode`);
+}
+
+startBot().catch(err=>{
+  console.error('Fatal start error:', err);
+  if(String(err?.description || err?.message || '').includes('409')){
+    console.error('Telegram 409: этот токен уже запущен в другом процессе. На Railway используй WEBHOOK_URL или останови второй процесс.');
+  }
+  process.exit(1);
+});
+
 process.once('SIGINT',()=>bot.stop('SIGINT'));
 process.once('SIGTERM',()=>bot.stop('SIGTERM'));
