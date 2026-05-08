@@ -40,6 +40,7 @@ export async function initDb() {
   await ensureColumn('users', 'vip_level', 'INT NOT NULL DEFAULT 0');
   await ensureColumn('users', 'vip_until', 'TIMESTAMP');
   await ensureColumn('users', 'is_banned', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await ensureColumn('users', 'is_admin', 'BOOLEAN NOT NULL DEFAULT FALSE');
   await ensureColumn('users', 'last_bonus_at', 'TIMESTAMP');
   await ensureColumn('users', 'last_work_at', 'TIMESTAMP');
   await ensureColumn('users', 'last_luck_at', 'TIMESTAMP');
@@ -61,6 +62,16 @@ export async function initDb() {
       END IF;
     END $$;
   `);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS admin_actions (
+    id SERIAL PRIMARY KEY,
+    admin_tg_id BIGINT,
+    target_tg_id BIGINT,
+    action TEXT NOT NULL,
+    amount NUMERIC NOT NULL DEFAULT 0,
+    meta TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
 
   await ensureColumn('facilities', 'video_cards', 'INT NOT NULL DEFAULT 0');
   await ensureColumn('facilities', 'max_video_cards', 'INT NOT NULL DEFAULT 10');

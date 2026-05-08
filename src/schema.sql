@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
   vip_level INT NOT NULL DEFAULT 0,
   vip_until TIMESTAMP,
   is_banned BOOLEAN NOT NULL DEFAULT FALSE,
+  is_admin BOOLEAN NOT NULL DEFAULT FALSE,
   referrer_id INT REFERENCES users(id),
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -175,6 +176,18 @@ CREATE TABLE IF NOT EXISTS cooldowns (
   PRIMARY KEY(user_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS admin_actions (
+  id SERIAL PRIMARY KEY,
+  admin_tg_id BIGINT,
+  target_tg_id BIGINT,
+  action TEXT NOT NULL,
+  amount NUMERIC NOT NULL DEFAULT 0,
+  meta TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_admin_actions_created ON admin_actions(created_at DESC);
+
+
 -- ===== AUTO-MIGRATIONS FOR OLDER DATABASES =====
 -- These ALTER statements make old Railway/PostgreSQL databases compatible with the current code.
 -- CREATE TABLE IF NOT EXISTS does not add new columns to existing tables, so we keep migrations here.
@@ -190,6 +203,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS energy INT NOT NULL DEFAULT 10;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_level INT NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_until TIMESTAMP;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id INT REFERENCES users(id);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();

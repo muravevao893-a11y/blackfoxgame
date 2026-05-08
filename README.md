@@ -186,3 +186,28 @@ Telegram по умолчанию включает Privacy Mode. С ним бот
 3. Redeploy.
 
 Когда `WEBHOOK_URL` задан, бот не использует polling/getUpdates, поэтому конфликт 409 исчезает.
+
+## Админка через базу данных
+
+В этой версии админ-доступ хранится прямо в таблице `users` в колонке `is_admin`.
+
+Первый раз сделай себя админом через Railway Shell:
+
+```bash
+npm run admin:make ТВОЙ_TELEGRAM_ID
+```
+
+После этого в Telegram будут доступны команды:
+
+```text
+/admin
+/adm_give @username 1000000
+/adm_give_id 123456789 1000000
+/adm_take @username 1000000
+/adm_set_foxes @username 5000000
+/adm_crystals @username 10
+/adm_make_admin_id 123456789
+/adm_remove_admin_id 123456789
+```
+
+Все админ-действия с выдачей/списанием пишутся в таблицу `admin_actions`.

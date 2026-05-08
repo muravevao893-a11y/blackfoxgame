@@ -1,13 +1,14 @@
 {
   "name": "blackfoxgame-bot",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "type": "module",
   "description": "BlackFox Game Telegram economic entertainment bot",
   "scripts": {
     "start": "node src/server.mjs",
     "db:init": "node scripts/init-db.mjs",
     "promo:create": "node scripts/create-promo.mjs",
-    "admin:give": "node scripts/admin-give.mjs"
+    "admin:give": "node scripts/admin-give.mjs",
+    "admin:make": "node scripts/make-admin.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
