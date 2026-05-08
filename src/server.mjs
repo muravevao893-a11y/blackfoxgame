@@ -85,7 +85,7 @@ async function normalizeGroupText(ctx,next){
 }
 bot.use(normalizeGroupText);
 
-function mainKeyboard(){ return Markup.keyboard([['профиль','баланс','задания'],['казино инфо','кейсы','бизнес'],['ферма','сад','клан'],['инвентарь','рынок','vip']]).resize(); }
+function mainKeyboard(){ return Markup.keyboard([['профиль','баланс','бонус'],['задания','pass','vip'],['казино инфо','кейсы','бизнес'],['ферма','сад','клан'],['инвентарь','рынок','vip']]).resize(); }
 function farmButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:farm'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:farm')],[Markup.button.callback('⬆️ Улучшить ферму','fac_upgrade:farm'),Markup.button.callback('🔼 Купить видеокарту','fac_card:farm')]]); }
 function gardenButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:garden'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:garden')],[Markup.button.callback('⬆️ Купить дерево','fac_tree:garden'),Markup.button.callback('💦 Полить сад','fac_water:garden')]]); }
 function businessButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:business'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:business')],[Markup.button.callback('⬆️ Увеличить территорию','fac_territory:business'),Markup.button.callback('🆙 Увеличить бизнес','fac_upgrade:business')]]); }
@@ -115,7 +115,7 @@ async function sendGroupWelcome(ctx){
 }
 async function sendHelp(ctx){
   if(isGroup(ctx)) return sendGroupHelp(ctx);
-  await ctx.reply(`🦊 <b>${BOT_NAME} — команды</b>\n\n<b>👤 Профиль</b>\nпрофиль, баланс, задания, pass, vip, реф\n\n<b>🎰 Игры</b>\nказино 1000 / казино все / казино половина\nмины 1000, монетка 1000 орел, кубик 1000\n\n<b>🏗 Экономика</b>\nбизнес, ферма, генератор, карьер, сад, дерево, банк\n\n<b>📦 Инвентарь</b>\nкейсы, купить кейс 1 3, открыть кейс 1 3, зелья\n\n<b>🏰 Социалка</b>\nклан, рынок, свадьба ID, развод, мой брак\n\n<b>🔮 Развлечения</b>\nшар вопрос, выбери А или Б, инфа текст, испытать удачу`, { parse_mode:'HTML', ...privateMenu() });
+  await ctx.reply(`🦊 <b>${BOT_NAME} — команды</b>\n\n<b>👤 Профиль</b>\nпрофиль, баланс, бонус, ежедневный бонус, задания, pass, vip, реф\n\n<b>🎰 Игры</b>\nказино 1000 / казино все / казино половина\nмины 1000, монетка 1000 орел, кубик 1000\n\n<b>🏗 Экономика</b>\nбизнес, ферма, генератор, карьер, сад, дерево, банк\n\n<b>📦 Инвентарь</b>\nкейсы, купить кейс 1 3, открыть кейс 1 3, зелья\n\n<b>🏰 Социалка</b>\nклан, рынок, свадьба ID, развод, мой брак\n\n<b>🔮 Развлечения</b>\nшар вопрос, выбери А или Б, инфа текст, испытать удачу`, { parse_mode:'HTML', ...privateMenu() });
 }
 async function sendGroupHelp(ctx){
   await ctx.reply(`🎮 <b>Команды для группы</b>\n\n<code>/profile</code> — твой профиль\n<code>/balance</code> — баланс\n<code>/casino 1000</code> — казино\n<code>/casino all</code> — ва-банк\n<code>/top</code> — топ игроков\n<code>/chat_top</code> — топ чата\n\nФан-команды при выключенном Privacy Mode:\nобнять @user, поцеловать @user, ударить @user, шар вопрос, инфа текст`, { parse_mode:'HTML', ...groupKeyboard() });
@@ -185,7 +185,46 @@ bot.hears(/^(профиль|кто я)$/i, sendProfile);
 bot.hears(/^баланс$/i, sendBalance);
 bot.hears(/^реф$/i, async ctx=>{ const u=await requireUser(ctx); const me=await ctx.telegram.getMe(); const c=await pool.query('SELECT COUNT(*) FROM users WHERE referrer_id=$1',[u.id]); await ctx.reply(`🔗 Твоя реф-ссылка:\nhttps://t.me/${me.username}?start=ref_${u.tg_id}\n\n👥 Рефералов: ${c.rows[0].count}\n🎁 За рефа: 50.000 Фоксов + 1 Кристалл`); });
 
-bot.hears(/^бонус$/i, async ctx=>{ const u=await requireUser(ctx); if(u.last_bonus_at && now()-new Date(u.last_bonus_at)<86400000) return ctx.reply('⏳ Бонус уже забран. Приходи позже.'); const reward=50000+u.level*2500+(u.vip_level*15000); await pool.query('UPDATE users SET foxes=foxes+$1,last_bonus_at=NOW() WHERE id=$2',[reward,u.id]); await addXp(u.id,80); await markDaily(u.id,'bonus_done'); await ctx.reply(`🎁 Ежедневный бонус: ${m(reward)}\n⚡ +80 XP`); });
+bot.hears(/^(бонус|ежедневный бонус|daily)$/i, async ctx=>{
+  const u = await requireUser(ctx);
+  if (u.last_bonus_at && now() - new Date(u.last_bonus_at) < 86400000) {
+    const left = 86400000 - (now() - new Date(u.last_bonus_at));
+    const h = Math.floor(left / 3600000);
+    const min = Math.ceil((left % 3600000) / 60000);
+    return ctx.reply(`⏳ <b>Ежедневный бонус уже забран</b>
+
+Возвращайся через: <b>${h}ч ${min}м</b>`, { parse_mode:'HTML' });
+  }
+
+  const baseReward = rnd(1_000_000, 20_000_000);
+  const vipBonus = Math.floor(baseReward * (Number(u.vip_level || 0) * 0.10));
+  const levelBonus = Math.floor(Number(u.level || 1) * 25_000);
+  const reward = baseReward + vipBonus + levelBonus;
+
+  await pool.query(
+    'UPDATE users SET foxes=foxes+$1,last_bonus_at=NOW() WHERE id=$2',
+    [reward, u.id]
+  );
+  await addXp(u.id, 150);
+  await markDaily(u.id, 'bonus_done');
+
+  await ctx.reply(
+    `🎁 <b>Ежедневный бонус получен!</b>
+
+` +
+    `🎲 Рандом: <b>${m(baseReward)}</b>
+` +
+    `⭐ VIP-бонус: <b>${m(vipBonus)}</b>
+` +
+    `🏅 Бонус уровня: <b>${m(levelBonus)}</b>
+
+` +
+    `💰 Итого начислено: <b>${m(reward)}</b>
+` +
+    `⚡ Опыт: <b>+150 XP</b>`,
+    { parse_mode:'HTML' }
+  );
+});
 bot.hears(/^работа$/i, async ctx=>{ const u=await requireUser(ctx); if(u.last_work_at && now()-new Date(u.last_work_at)<3600000) return ctx.reply('⏳ Работать можно раз в час.'); const reward=rnd(8000,35000)+u.level*1000; await pool.query('UPDATE users SET foxes=foxes+$1,last_work_at=NOW() WHERE id=$2',[reward,u.id]); await addXp(u.id,50); await ctx.reply(`🧰 Ты поработал и получил ${m(reward)}\n⚡ +50 XP`); });
 
 bot.hears(/^задания$/i, async ctx=>{ const u=await requireUser(ctx); const d=await daily(u.id); const done=[d.bonus_done,d.casino_count>=5,d.collect_done,d.garden_done,d.case_done].filter(Boolean).length; const txt=`📋 Задания на сегодня\n\n1. Забрать бонус — ${d.bonus_done?'✅':'❌'}\n2. Сыграть в казино 5 раз — ${d.casino_count}/5\n3. Собрать прибыль — ${d.collect_done?'✅':'❌'}\n4. Полить сад — ${d.garden_done?'✅':'❌'}\n5. Открыть кейс — ${d.case_done?'✅':'❌'}\n\nНаграда: 150.000 Фоксов + 5 Кристаллов\nГотово: ${done}/5`; await ctx.reply(txt, Markup.inlineKeyboard([[Markup.button.callback('🎁 Забрать награду','daily_claim')]])); });
@@ -317,6 +356,10 @@ const WEBHOOK_PATH = process.env.WEBHOOK_PATH || `/telegram/${process.env.BOT_TO
 const rawWebhookUrl = process.env.WEBHOOK_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '');
 
 async function startBot(){
+  console.log('Checking database schema...');
+  await initDb();
+  console.log('Database schema is ready');
+
   if(rawWebhookUrl){
     const app = express();
     app.get('/', (_, res) => res.send(`${BOT_NAME} is alive`));
