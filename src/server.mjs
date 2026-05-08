@@ -1,1451 +1,251 @@
 import dotenv from 'dotenv';
 import { Telegraf, Markup } from 'telegraf';
-import { pool, requireUser, initDb, logTx } from './db.mjs';
+import { initDb, pool, requireUser, logTx } from './db.mjs';
 
 dotenv.config();
-
 const BOT_NAME = 'BlackFox Game';
 const CURRENCY = 'Фоксы';
 const GEM = 'Кристаллы';
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const adminIds = new Set((process.env.ADMIN_IDS || '').split(',').map(x => Number(x.trim())).filter(Boolean));
+const localSpam = new Map();
 
-const businesses = [
-  { id: 1, title: 'Кофейня у лиса', price: 75000, income: 9000 },
-  { id: 2, title: 'Неоновый бар', price: 250000, income: 35000 },
-  { id: 3, title: 'Кибер-арена', price: 900000, income: 135000 },
-  { id: 4, title: 'Fox Casino Hall', price: 2500000, income: 420000 },
-  { id: 5, title: 'Черный небоскреб', price: 9000000, income: 1600000 }
+const ranks = ['Новичок','Игрок','Дилер','Магнат','Барон','Олигарх','Легенда','Император','Черный Лис'];
+const cases = [
+  { id:1, key:'case_1', title:'Лисий кейс', price:25000, min:15000, max:90000, gems:1, gemChance:.08, jackpot:.015 },
+  { id:2, key:'case_2', title:'Неоновый кейс', price:120000, min:90000, max:380000, gems:3, gemChance:.18, jackpot:.035 },
+  { id:3, key:'case_3', title:'Королевский кейс', price:600000, min:450000, max:1800000, gems:8, gemChance:.35, jackpot:.06 },
+  { id:4, key:'case_4', title:'BlackFox кейс', price:2500000, min:1500000, max:8500000, gems:25, gemChance:.55, jackpot:.09 }
 ];
-
-const houses = [
-  { id: 1, title: 'Комната в общаге', price: 45000 },
-  { id: 2, title: 'Квартира в центре', price: 350000 },
-  { id: 3, title: 'Пентхаус', price: 2500000 },
-  { id: 4, title: 'Вилла BlackFox', price: 12000000 }
-];
-
-const cars = [
-  { id: 1, title: 'Старая BMW', price: 120000 },
-  { id: 2, title: 'Neon GT', price: 850000 },
-  { id: 3, title: 'Fox Phantom', price: 4200000 },
-  { id: 4, title: 'Hyper Beast', price: 15000000 }
-];
-
-const caseTypes = [
-  { id: 1, title: 'Лисий кейс', price: 25000, minFoxes: 15000, maxFoxes: 90000, crystalChance: 0.08, jackpotChance: 0.015 },
-  { id: 2, title: 'Неоновый кейс', price: 120000, minFoxes: 90000, maxFoxes: 380000, crystalChance: 0.18, jackpotChance: 0.035 },
-  { id: 3, title: 'Королевский кейс', price: 600000, minFoxes: 450000, maxFoxes: 1800000, crystalChance: 0.35, jackpotChance: 0.06 },
-  { id: 4, title: 'BFG-style кейс', price: 2500000, minFoxes: 1500000, maxFoxes: 8500000, crystalChance: 0.55, jackpotChance: 0.09 }
-];
-
-const facilityTypes = {
-  business: { title: 'Бизнес', aliases: ['бизнес', 'мой бизнес'], build: 'построить бизнес', price: 350000, income: 65000, intervalHours: 6, icon: '🗄' },
-  generator: { title: 'Генератор', aliases: ['генератор', 'мой генератор'], build: 'построить генератор', price: 750000, income: 145000, intervalHours: 6, icon: '🏭' },
-  farm: { title: 'Майнинг ферма', aliases: ['ферма', 'моя ферма', 'майнинг ферма', 'моя майнинг ферма'], build: 'построить ферму', price: 1400000, income: 3000, intervalHours: 1, icon: '🧰' },
-  quarry: { title: 'Карьер', aliases: ['карьер', 'мой карьер'], build: 'построить карьер', price: 2800000, income: 720000, intervalHours: 10, icon: '⚠️' },
-  tree: { title: 'Денежное дерево', aliases: ['денежное дерево', 'моё дерево', 'мое дерево'], build: 'построить участок', price: 500000, income: 90000, intervalHours: 4, icon: '🏡' },
-  garden: { title: 'Сад', aliases: ['сад', 'мой сад'], build: 'построить сад', price: 900000, income: 120000, intervalHours: 6, icon: '🌳' }
+const facilities = {
+  business:{ title:'Бизнес', icon:'🗄', build:'построить бизнес', aliases:['бизнес','мой бизнес'], price:350000, income:65000, interval:6 },
+  generator:{ title:'Генератор', icon:'🏭', build:'построить генератор', aliases:['генератор','мой генератор'], price:750000, income:145000, interval:6 },
+  farm:{ title:'Майнинг ферма', icon:'🔋', build:'построить ферму', aliases:['ферма','моя ферма','майнинг ферма'], price:1400000, income:3000, interval:1 },
+  quarry:{ title:'Карьер', icon:'⚠️', build:'построить карьер', aliases:['карьер','мой карьер'], price:2800000, income:720000, interval:10 },
+  tree:{ title:'Денежное дерево', icon:'🌳', build:'построить участок', aliases:['денежное дерево','моё дерево','мое дерево'], price:500000, income:90000, interval:4 },
+  garden:{ title:'Сад', icon:'🪧', build:'построить сад', aliases:['сад','мой сад'], price:900000, income:120000, interval:6 }
 };
-
-const magicBallAnswers = [
-  'да, но лучше без резких движений', 'нет, вселенная орет «не сегодня»', 'шансы хорошие',
-  'ответ где-то рядом, но он в отпуске', '100%, если не забьешь', 'сомнительно, но красиво',
-  'да, лис подтверждает', 'лучше спроси позже', 'нет, но можно переиграть', 'возможно, если повезет'
+const potions = [
+  { id:1, key:'potion_luck', title:'Зелье удачи', cost:3, text:'+шанс джекпота в кейсах на 2 часа' },
+  { id:2, key:'potion_income', title:'Зелье дохода', cost:5, text:'+25% к доходу построек на 2 часа' },
+  { id:3, key:'potion_azart', title:'Зелье азарта', cost:7, text:'+3 заряда удачи' }
 ];
 
-const potionTypes = [
-  { id: 1, title: 'Зелье удачи', cost: 3, effect: 'case_luck', description: 'повышает шанс джекпота в кейсах на 2 часа' },
-  { id: 2, title: 'Зелье дохода', cost: 5, effect: 'income_boost', description: 'дает +25% к пассивному доходу на 2 часа' },
-  { id: 3, title: 'Зелье азарта', cost: 7, effect: 'luck_potions', description: 'выдает 3 заряда для команды «испытать удачу»' }
-];
+const m = v => `${Number(v || 0).toLocaleString('ru-RU')} ${CURRENCY}`;
+const g = v => `${Number(v || 0).toLocaleString('ru-RU')} ${GEM}`;
+const cash = v => `${Number(v || 0).toLocaleString('ru-RU').replace(/\u00a0/g,'.').replace(/ /g,'.')}$`;
+const rnd = (a,b)=>Math.floor(Math.random()*(b-a+1))+a;
+const now = () => new Date();
+function rank(level){ return ranks[Math.min(ranks.length-1, Math.floor((Number(level)-1)/5))]; }
+function parseAmount(raw, user){ const s=String(raw||'').toLowerCase().trim(); if(['все','all','вабанк'].includes(s)) return Math.floor(Number(user.foxes)); if(['половина','пол','half'].includes(s)) return Math.floor(Number(user.foxes)/2); const n=Number(s.replace(/\s/g,'')); return Number.isFinite(n)?Math.floor(n):NaN; }
+function admin(ctx){ return adminIds.has(ctx.from.id); }
+async function getUserByAny(raw){ const s=String(raw||'').replace('@','').trim(); if(/^\d+$/.test(s)){ const r=await pool.query('SELECT * FROM users WHERE tg_id=$1 OR id=$1',[Number(s)]); return r.rows[0]; } const r=await pool.query('SELECT * FROM users WHERE LOWER(username)=LOWER($1)',[s]); return r.rows[0]; }
+async function addItem(userId,key,title,amount=1,meta={}){ await pool.query(`INSERT INTO inventory_items(user_id,item_key,title,amount,meta) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,item_key) DO UPDATE SET amount=inventory_items.amount+EXCLUDED.amount,title=EXCLUDED.title`,[userId,key,title,amount,JSON.stringify(meta)]); }
+async function takeItem(userId,key,amount=1){ const r=await pool.query('UPDATE inventory_items SET amount=amount-$1 WHERE user_id=$2 AND item_key=$3 AND amount>=$1 RETURNING *',[amount,userId,key]); return !!r.rows[0]; }
+async function addXp(userId, amount){ const r=await pool.query('UPDATE users SET xp=xp+$1, pass_xp=pass_xp+$1 WHERE id=$2 RETURNING xp, level',[amount,userId]); const u=r.rows[0]; const lvl=Math.floor(Number(u.xp)/1000)+1; if(lvl>Number(u.level)) await pool.query('UPDATE users SET level=$1, foxes=foxes+$2, crystals=crystals+1 WHERE id=$3',[lvl,lvl*10000,userId]); }
+async function daily(userId){ await pool.query('INSERT INTO daily_progress(user_id,day) VALUES($1,CURRENT_DATE) ON CONFLICT DO NOTHING',[userId]); const r=await pool.query('SELECT * FROM daily_progress WHERE user_id=$1 AND day=CURRENT_DATE',[userId]); return r.rows[0]; }
+async function markDaily(userId, col, inc=false){ await daily(userId); if(inc) await pool.query(`UPDATE daily_progress SET ${col}=${col}+1 WHERE user_id=$1 AND day=CURRENT_DATE`,[userId]); else await pool.query(`UPDATE daily_progress SET ${col}=TRUE WHERE user_id=$1 AND day=CURRENT_DATE`,[userId]); }
+async function clanBonus(userId){ const r=await pool.query('SELECT c.level FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[userId]); return r.rows[0] ? 1 + Number(r.rows[0].level)*0.02 : 1; }
+async function ensureNotSpam(ctx,next){ if(!ctx.from) return next(); const t=Date.now(), k=ctx.from.id; const last=localSpam.get(k)||0; if(t-last<500) return; localSpam.set(k,t); const user=await requireUser(ctx); if(user?.is_banned) return ctx.reply('🚫 Ты заблокирован в боте.'); return next(); }
+bot.use(ensureNotSpam);
 
+function mainKeyboard(){ return Markup.keyboard([['профиль','баланс','задания'],['казино инфо','кейсы','бизнес'],['ферма','сад','клан'],['инвентарь','рынок','vip']]).resize(); }
+function farmButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:farm'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:farm')],[Markup.button.callback('⬆️ Улучшить ферму','fac_upgrade:farm'),Markup.button.callback('🔼 Купить видеокарту','fac_card:farm')]]); }
+function gardenButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:garden'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:garden')],[Markup.button.callback('⬆️ Купить дерево','fac_tree:garden'),Markup.button.callback('💦 Полить сад','fac_water:garden')]]); }
+function businessButtons(){ return Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль','fac_collect:business'),Markup.button.callback('🦅 Оплатить налоги','fac_tax:business')],[Markup.button.callback('⬆️ Увеличить территорию','fac_territory:business'),Markup.button.callback('🆙 Увеличить бизнес','fac_upgrade:business')]]); }
 
-function money(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${CURRENCY}`; }
-function gameCash(v) { return `${Number(v || 0).toLocaleString('ru-RU').replace(/\u00a0/g, '.').replace(/ /g, '.')}\$`; }
-function gems(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${GEM}`; }
-function isAdmin(ctx) { return adminIds.has(ctx.from.id); }
-function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-function parseAmount(raw, user) {
-  const s = String(raw || '').trim().toLowerCase();
-  const balance = Number(user.foxes);
-  if (['все', 'all', 'вабанк'].includes(s)) return Math.floor(balance);
-  if (['половина', 'half', 'пол'].includes(s)) return Math.floor(balance / 2);
-  const n = Number(s.replace(/\s/g, ''));
-  return Number.isFinite(n) ? Math.floor(n) : NaN;
-}
-async function addXp(userId, amount) {
-  const r = await pool.query('UPDATE users SET xp = xp + $1 WHERE id = $2 RETURNING xp, level', [amount, userId]);
-  const u = r.rows[0];
-  const nextLevel = Math.max(1, Math.floor(Number(u.xp) / 1000) + 1);
-  if (nextLevel > Number(u.level)) {
-    await pool.query('UPDATE users SET level = $1, foxes = foxes + $2 WHERE id = $3', [nextLevel, nextLevel * 2500, userId]);
-    return nextLevel;
-  }
-  return null;
-}
-async function findUserByMention(mention) {
-  const username = mention.replace('@', '').toLowerCase();
-  const r = await pool.query('SELECT * FROM users WHERE LOWER(username) = $1', [username]);
-  return r.rows[0];
-}
-
-async function findUserByTgId(tgId) {
-  const r = await pool.query('SELECT * FROM users WHERE tg_id = $1', [Number(tgId)]);
-  return r.rows[0];
-}
-function nowPlusHours(hours) {
-  return new Date(Date.now() + hours * 60 * 60 * 1000);
-}
-function normalizeRu(text) {
-  return String(text || '').trim().toLowerCase().replaceAll('ё', 'е');
-}
-function formatDuration(ms) {
-  const totalMin = Math.max(1, Math.ceil(ms / 60000));
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  return h ? `${h}ч ${m}м` : `${m}м`;
-}
-async function ensureFacility(user, kind) {
-  const cfg = facilityTypes[kind];
-  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, kind]);
-  return { cfg, facility: r.rows[0] };
-}
-async function collectFacilityIncome(user, kind) {
-  const { cfg, facility } = await ensureFacility(user, kind);
-  if (!facility) return { cfg, facility: null, collected: 0, waitMs: 0 };
-  const last = facility.last_collect_at ? new Date(facility.last_collect_at).getTime() : new Date(facility.created_at).getTime();
-  const intervalMs = cfg.intervalHours * 60 * 60 * 1000;
-  const passed = Date.now() - last;
-  if (passed < intervalMs) return { cfg, facility, collected: 0, waitMs: intervalMs - passed };
-  const boostActive = user.income_boost_until && new Date(user.income_boost_until).getTime() > Date.now();
-  const income = Math.floor(Number(facility.income) * (boostActive ? 1.25 : 1));
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [income, user.id]);
-  await pool.query('UPDATE facilities SET last_collect_at=NOW() WHERE id=$1', [facility.id]);
-  await logTx(user.id, `${kind}_collect`, income);
-  return { cfg, facility, collected: income, waitMs: 0 };
-}
-
-
-// ===== BFG-style mining farm helpers =====
-const FARM = {
-  baseIncome: 3000,
-  videoCardIncome: 17500,
-  videoCardPrice: 250000,
-  taxRate: 0.05,
-  taxLimit: 5000000,
-  levelUpgradeBase: 500000000
-};
-
-function farmMaxCards(level) {
-  return Math.max(10, Number(level || 1) * 10);
-}
-function farmUpgradeCost(level) {
-  return FARM.levelUpgradeBase * Math.max(1, Number(level || 1));
-}
-function farmIncomePerHour(facility) {
-  const level = Number(facility?.level || 1);
-  const cards = Number(facility?.video_cards || 0);
-  return Math.floor(FARM.baseIncome * level + cards * FARM.videoCardIncome);
-}
-function farmTaxLimit(facility) {
-  return FARM.taxLimit * Math.max(1, Number(facility?.level || 1));
-}
-function farmKeyboard() {
+function isPrivate(ctx){ return ctx.chat?.type === 'private'; }
+function isGroup(ctx){ return ['group','supergroup'].includes(ctx.chat?.type); }
+function groupKeyboard(){
   return Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Собрать прибыль', 'farm_collect'), Markup.button.callback('🦅 Оплатить налоги', 'farm_tax')],
-    [Markup.button.callback('⬆️ Улучшить ферму', 'farm_upgrade')],
-    [Markup.button.callback('🔼 Купить видеокарту', 'farm_card')]
+    [Markup.button.callback('🎮 Команды чата','group_help'), Markup.button.callback('🏆 Топ','group_top')]
   ]);
 }
-async function syncFarm(facility) {
-  if (!facility) return null;
-  const now = Date.now();
-  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
-  const hours = Math.max(0, (now - last) / 3600000);
-  if (hours < 0.01) return facility;
-
-  const taxLimit = farmTaxLimit(facility);
-  const taxDebt = Number(facility.tax_debt || 0);
-  if (taxDebt >= taxLimit) {
-    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
-    return r.rows[0];
-  }
-
-  const generated = Math.floor(farmIncomePerHour(facility) * hours);
-  if (generated <= 0) {
-    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
-    return r.rows[0];
-  }
-
-  const taxAdd = Math.floor(generated * FARM.taxRate);
-  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
-  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
-
-  const r = await pool.query(
-    'UPDATE facilities SET account=account+$1, tax_debt=$2, last_tick_at=NOW() WHERE id=$3 RETURNING *',
-    [allowedIncome, newTax, facility.id]
-  );
-  return r.rows[0];
-}
-async function getFarm(user) {
-  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'farm']);
-  if (!r.rows[0]) return null;
-  return syncFarm(r.rows[0]);
-}
-function farmText(user, farm) {
-  if (!farm) {
-    return `🧰 У тебя пока нет «Майнинг ферма».\n\n🏗 Построить ферму — ${money(facilityTypes.farm.price)}\nПосле постройки появятся видеокарты, налоги, счёт и прибыль.`;
-  }
-  const income = farmIncomePerHour(farm);
-  const cards = Number(farm.video_cards || 0);
-  const maxCards = farmMaxCards(farm.level);
-  const tax = Number(farm.tax_debt || 0);
-  const taxLimit = farmTaxLimit(farm);
-  const account = Number(farm.account || 0);
-  const next = farmUpgradeCost(farm.level);
-  const username = user.first_name || user.username || 'игрок';
-  return `кассик, информация о вашей "Майнинг ферма":\n` +
-    `🏭 Доход: ${income.toLocaleString('ru-RU')}/час.\n` +
-    `📝 Видеокарты: ${cards} шт./${maxCards} шт.\n` +
-    `🆙 Для следующего уровня: ${next.toLocaleString('ru-RU')}$\n\n` +
-    `🦅 Налоги: ${tax.toLocaleString('ru-RU')}$/${taxLimit.toLocaleString('ru-RU')}$\n` +
-    `💰 На счету: ${account.toLocaleString('ru-RU')}$`;
-}
-async function showFarm(ctx, user, edit = false) {
-  const farm = await getFarm(user);
-  const text = farmText(user, farm);
-  const extra = farm ? farmKeyboard() : undefined;
-  if (edit && ctx.updateType === 'callback_query') {
-    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
-  }
-  return ctx.reply(text, extra);
-}
-
-
-// ===== BFG-style business helpers =====
-const BUSINESS = {
-  baseTerritory: 120,
-  baseBusiness: 120,
-  taxRate: 0.05,
-  taxLimit: 5000000,
-  territoryUpgradeBase: 200000000000,
-  businessUpgradeBase: 280000000000,
-  buildIncomeMultiplier: 292
-};
-
-function businessIncomePerHour(facility) {
-  const territory = Number(facility?.territory_m2 || BUSINESS.baseTerritory);
-  const businessArea = Number(facility?.business_m2 || BUSINESS.baseBusiness);
-  const level = Number(facility?.level || 1);
-  return Math.floor(Math.pow(territory, 3) * Math.pow(businessArea, 2) * BUSINESS.buildIncomeMultiplier * level);
-}
-function businessTaxLimit(facility) {
-  return BUSINESS.taxLimit * Math.max(1, Number(facility?.level || 1));
-}
-function businessTerritoryUpgradeCost(facility) {
-  const territory = Number(facility?.territory_m2 || BUSINESS.baseTerritory);
-  return Math.floor(BUSINESS.territoryUpgradeBase * Math.pow(1.18, territory - BUSINESS.baseTerritory));
-}
-function businessUpgradeCost(facility) {
-  const businessArea = Number(facility?.business_m2 || BUSINESS.baseBusiness);
-  return Math.floor(BUSINESS.businessUpgradeBase * Math.pow(1.17, businessArea - BUSINESS.baseBusiness));
-}
-function businessKeyboard() {
+function privateMenu(){
   return Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Собрать прибыль', 'business_collect'), Markup.button.callback('🦅 Оплатить налоги', 'business_tax')],
-    [Markup.button.callback('⬆️ Увеличить территорию', 'business_territory'), Markup.button.callback('🆙 Увеличить бизнес', 'business_upgrade')]
+    [Markup.button.callback('👤 Профиль','menu_profile'), Markup.button.callback('💰 Баланс','menu_balance')],
+    [Markup.button.callback('🎰 Игры','menu_games'), Markup.button.callback('🏗 Постройки','menu_buildings')],
+    [Markup.button.callback('📦 Кейсы','menu_cases'), Markup.button.callback('🏰 Кланы','menu_clans')]
   ]);
 }
-async function syncBusiness(facility) {
-  if (!facility) return null;
-  const now = Date.now();
-  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
-  const hours = Math.max(0, (now - last) / 3600000);
-  if (hours < 0.01) return facility;
-  const taxLimit = businessTaxLimit(facility);
-  const taxDebt = Number(facility.tax_debt || 0);
-  if (taxDebt >= taxLimit) {
-    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
-    return r.rows[0];
-  }
-  const generated = Math.floor(businessIncomePerHour(facility) * hours);
-  if (generated <= 0) {
-    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
-    return r.rows[0];
-  }
-  const taxAdd = Math.floor(generated * BUSINESS.taxRate);
-  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
-  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
-  const r = await pool.query(
-    'UPDATE facilities SET account=account+$1, tax_debt=$2, last_tick_at=NOW() WHERE id=$3 RETURNING *',
-    [allowedIncome, newTax, facility.id]
-  );
-  return r.rows[0];
+function cleanCommandText(ctx){ return (ctx.message?.text || '').replace(/^\/\w+(?:@\w+)?\s*/,'').trim(); }
+async function sendPrivateWelcome(ctx){
+  const user=await requireUser(ctx);
+  await ctx.reply(`🦊 <b>${BOT_NAME}</b>\n\nДобро пожаловать в экономическую игру нового поколения.\n\n💰 Баланс: <b>${m(user.foxes)}</b>\n💎 ${g(user.crystals)}\n🏅 Уровень: <b>${user.level}</b> • ${rank(user.level)}\n\nНажимай кнопки или пиши: <b>помощь</b>`, { parse_mode:'HTML', ...privateMenu() });
 }
-async function getBusinessFacility(user) {
-  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'business']);
-  if (!r.rows[0]) return null;
-  return syncBusiness(r.rows[0]);
+async function sendGroupWelcome(ctx){
+  const me=await ctx.telegram.getMe();
+  await ctx.reply(`🦊 <b>${BOT_NAME}</b> в чате!\n\nЯ добавил игровые команды для групп: рейтинги, казино, фан-команды, браки и быстрые профили.\n\n✅ Работает сразу: <code>/help</code>, <code>/profile</code>, <code>/balance</code>, <code>/casino 1000</code>, <code>/top</code>\n⚙️ Чтобы бот реагировал на обычный текст типа «баланс» в группе, отключи Privacy Mode у @BotFather.\n\nЛС: @${me.username}`, { parse_mode:'HTML', ...groupKeyboard() });
 }
-function businessText(user, business) {
-  if (!business) {
-    return `кассик, у вас пока нет бизнеса.\n\n🏗 Построить бизнес — ${gameCash(facilityTypes.business.price)}\nПосле постройки появятся территория, налоги, счёт и прибыль.`;
-  }
-  const territory = Number(business.territory_m2 || BUSINESS.baseTerritory);
-  const area = Number(business.business_m2 || BUSINESS.baseBusiness);
-  const income = businessIncomePerHour(business);
-  const tax = Number(business.tax_debt || 0);
-  const taxLimit = businessTaxLimit(business);
-  const account = Number(business.account || 0);
-  const territoryNext = businessTerritoryUpgradeCost(business);
-  const businessNext = businessUpgradeCost(business);
-  return `кассик информация о вашем Бизнесе "Бизнес":\n` +
-    `🧱 Территория: ${territory} м²\n` +
-    `🆙 Для следующего уровня: ${gameCash(territoryNext)}\n` +
-    `🏢 Территория бизнеса: ${area} м²\n` +
-    `🆙 Для следующего уровня: ${gameCash(businessNext)}\n\n` +
-    `💵 Доход: ${gameCash(income)}\n` +
-    `🦅 Налоги: ${gameCash(tax)}/${gameCash(taxLimit)}\n` +
-    `💰 Прибыль: ${gameCash(account)}`;
+async function sendHelp(ctx){
+  if(isGroup(ctx)) return sendGroupHelp(ctx);
+  await ctx.reply(`🦊 <b>${BOT_NAME} — команды</b>\n\n<b>👤 Профиль</b>\nпрофиль, баланс, задания, pass, vip, реф\n\n<b>🎰 Игры</b>\nказино 1000 / казино все / казино половина\nмины 1000, монетка 1000 орел, кубик 1000\n\n<b>🏗 Экономика</b>\nбизнес, ферма, генератор, карьер, сад, дерево, банк\n\n<b>📦 Инвентарь</b>\nкейсы, купить кейс 1 3, открыть кейс 1 3, зелья\n\n<b>🏰 Социалка</b>\nклан, рынок, свадьба ID, развод, мой брак\n\n<b>🔮 Развлечения</b>\nшар вопрос, выбери А или Б, инфа текст, испытать удачу`, { parse_mode:'HTML', ...privateMenu() });
 }
-async function showBusiness(ctx, user, edit = false) {
-  const business = await getBusinessFacility(user);
-  const text = businessText(user, business);
-  const extra = business ? businessKeyboard() : undefined;
-  if (edit && ctx.updateType === 'callback_query') {
-    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
-  }
-  return ctx.reply(text, extra);
+async function sendGroupHelp(ctx){
+  await ctx.reply(`🎮 <b>Команды для группы</b>\n\n<code>/profile</code> — твой профиль\n<code>/balance</code> — баланс\n<code>/casino 1000</code> — казино\n<code>/casino all</code> — ва-банк\n<code>/top</code> — топ игроков\n<code>/chat_top</code> — топ чата\n\nФан-команды при выключенном Privacy Mode:\nобнять @user, поцеловать @user, ударить @user, шар вопрос, инфа текст`, { parse_mode:'HTML', ...groupKeyboard() });
+}
+async function sendProfile(ctx){
+  const u=await requireUser(ctx);
+  const cl=await pool.query('SELECT c.title FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[u.id]);
+  const mar=await pool.query('SELECT * FROM marriages WHERE user1_id=$1 OR user2_id=$1',[u.id]);
+  await ctx.reply(`👤 <b>Профиль игрока</b>\n\n🆔 ID: <code>${u.tg_id}</code>\n👑 Ник: <b>${u.username?'@'+u.username:u.first_name}</b>\n🏅 Уровень: <b>${u.level}</b> • ${rank(u.level)}\n⚡ Опыт: <b>${u.xp}</b>\n\n💰 Баланс: <b>${m(u.foxes)}</b>\n🏦 Банк: <b>${m(u.bank)}</b>\n💎 ${g(u.crystals)}\n⭐ VIP: <b>${u.vip_level || 0}</b>\n\n🏰 Клан: <b>${cl.rows[0]?.title || 'нет'}</b>\n💒 Брак: <b>${mar.rows[0]?'есть':'нет'}</b>`, { parse_mode:'HTML' });
+}
+async function sendBalance(ctx){
+  const u=await requireUser(ctx);
+  await ctx.reply(`💰 <b>Баланс</b>\n\nНа руках: <b>${m(u.foxes)}</b>\nВ банке: <b>${m(u.bank)}</b>\nПремиум: <b>${g(u.crystals)}</b>`, { parse_mode:'HTML' });
+}
+async function sendTop(ctx, title='🏆 Топ игроков'){
+  const r=await pool.query('SELECT username,first_name,foxes FROM users ORDER BY foxes DESC LIMIT 10');
+  await ctx.reply(`<b>${title}</b>\n\n`+r.rows.map((u,i)=>`${i+1}. ${u.username?'@'+u.username:u.first_name} — <b>${m(u.foxes)}</b>`).join('\n'), { parse_mode:'HTML' });
+}
+async function runSlashCasino(ctx){
+  const u=await requireUser(ctx);
+  const raw=cleanCommandText(ctx) || 'инфо';
+  if(raw==='инфо') return ctx.reply('🎰 Казино\n\n/casino 1000\n/casino all\n/casino half\n\nШансы: x5 — 3%, x3 — 8%, x2 — 31%, проигрыш — 58%');
+  const normalized=raw.replace(/^all$/i,'все').replace(/^half$/i,'половина');
+  return casinoResult(ctx,parseAmount(normalized,u));
 }
 
-
-
-// ===== BFG-style garden helpers =====
-const GARDEN = {
-  baseTrees: 10,
-  maxWater: 100,
-  treeIncome: 3300000,
-  treePriceBase: 6068336601,
-  taxRate: 0.05,
-  taxLimit: 5000000,
-  waterPerHour: 4,
-  waterUsePerHour: 2
-};
-
-function gardenTrees(facility) {
-  return Math.max(GARDEN.baseTrees, Number(facility?.trees_count || GARDEN.baseTrees));
-}
-function gardenIncomePerHour(facility) {
-  return Math.floor(gardenTrees(facility) * GARDEN.treeIncome * Math.max(1, Number(facility?.level || 1)));
-}
-function gardenTreeCost(facility) {
-  const trees = gardenTrees(facility);
-  return Math.floor(GARDEN.treePriceBase * Math.pow(1.22, trees - GARDEN.baseTrees));
-}
-function gardenTaxLimit(facility) {
-  return GARDEN.taxLimit * Math.max(1, Number(facility?.level || 1));
-}
-function gardenKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Собрать прибыль', 'garden_collect'), Markup.button.callback('🦅 Оплатить налоги', 'garden_tax')],
-    [Markup.button.callback('⬆️ Купить дерево', 'garden_tree'), Markup.button.callback('💦 Полить сад', 'garden_water')]
-  ]);
-}
-async function syncGarden(facility) {
-  if (!facility) return null;
-  const now = Date.now();
-  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
-  const hours = Math.max(0, (now - last) / 3600000);
-  if (hours < 0.01) return facility;
-
-  const currentWater = Number(facility.water || GARDEN.maxWater);
-  const waterLoss = Math.floor(hours * GARDEN.waterUsePerHour);
-  const newWater = Math.max(0, currentWater - waterLoss);
-  const taxLimit = gardenTaxLimit(facility);
-  const taxDebt = Number(facility.tax_debt || 0);
-
-  let generated = 0;
-  if (newWater > 0 && taxDebt < taxLimit) {
-    generated = Math.floor(gardenIncomePerHour(facility) * hours);
-  }
-  const taxAdd = Math.floor(generated * GARDEN.taxRate);
-  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
-  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
-
-  const r = await pool.query(
-    'UPDATE facilities SET account=account+$1, tax_debt=$2, water=$3, last_tick_at=NOW() WHERE id=$4 RETURNING *',
-    [allowedIncome, newTax, newWater, facility.id]
-  );
-  return r.rows[0];
-}
-async function getGarden(user) {
-  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'garden']);
-  if (!r.rows[0]) return null;
-  return syncGarden(r.rows[0]);
-}
-function gardenText(user, garden) {
-  if (!garden) {
-    return `кассик, у вас пока нет сада.\n\n🏗 Построить сад — ${gameCash(facilityTypes.garden.price)}\nПосле постройки появятся деревья, вода, налоги, счёт и прибыль.`;
-  }
-  const income = gardenIncomePerHour(garden);
-  const trees = gardenTrees(garden);
-  const next = gardenTreeCost(garden);
-  const water = Number(garden.water ?? GARDEN.maxWater);
-  const maxWater = Number(garden.max_water || GARDEN.maxWater);
-  const tax = Number(garden.tax_debt || 0);
-  const taxLimit = gardenTaxLimit(garden);
-  const account = Number(garden.account || 0);
-  const dry = water <= 0;
-  return `кассик, информация о вашем "Сад":\n` +
-    `🥐 Доход: ${gameCash(income)}\n` +
-    `🌳 Деревья: ${trees} шт./10 шт.\n` +
-    `🆙 Для следующего уровня: ${gameCash(next)}\n\n` +
-    `💦 Воды: ${water}/${maxWater}\n` +
-    `🦅 Налоги: ${gameCash(tax)}/${gameCash(taxLimit)}\n` +
-    `📦 На-счету: ${gameCash(account)}\n\n` +
-    `${dry ? '⚠️ Сад засох. Полейте его, иначе прибыль не копится.' : '⭐ Не забывайте поливать дерево иначе оно засохнет.'}`;
-}
-async function showGarden(ctx, user, edit = false) {
-  const garden = await getGarden(user);
-  const text = gardenText(user, garden);
-  const extra = garden ? gardenKeyboard() : undefined;
-  if (edit && ctx.updateType === 'callback_query') {
-    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
-  }
-  return ctx.reply(text, extra);
-}
-
-const helpText = `🦊 ${BOT_NAME}
-
-Валюта: ${CURRENCY}
-Донат-валюта: ${GEM}
-
-🎮 Игрок:
-профиль / баланс
-бонус
-работа
-реф
-передать @user сумма
-
-🎲 Бурмалденс-развлекуха:
-шар фраза
-выбери фраза или фраза2
-инфа фраза
-испытать удачу
-
-💒 Браки:
-свадьба ID_пользователя
-развод
-мой брак
-
-📦 Кейсы:
-кейсы
-купить кейс номер количество
-открыть кейс номер количество
-
-🎰 Игры:
-казино сумма / казино все / казино половина
-монетка сумма орел/решка
-кубик сумма
-
-🏦 Экономика:
-банк
-банк положить сумма
-банк снять сумма
-магазин
-
-🗄 Пассивный доход:
-бизнес / мой бизнес / построить бизнес
-генератор / мой генератор / построить генератор
-ферма / моя ферма / построить ферму
-карьер / мой карьер / построить карьер
-денежное дерево / моё дерево / построить участок
-сад / мой сад / построить сад
-сад собрать / сад налоги
-купить дерево / сад полить
-зелья
-создать зелье номер
-
-🛡 Кланы:
-клан
-клан создать Название
-клан вступить ID
-клан донат сумма
-топ кланы
-
-🏆 Рейтинги:
-топ
-промо КОД
-
-Важно: это виртуальная игра без вывода денег.`
-bot.start(async (ctx) => {
-  const user = await requireUser(ctx);
-  await ctx.reply(`🦊 Добро пожаловать в ${BOT_NAME}!
-
-Тебе начислено: ${money(user.foxes)}
-Пиши: помощь`);
-});
-
-bot.hears(/^(помощь|help|меню)$/i, async (ctx) => { await requireUser(ctx); await ctx.reply(helpText); });
-
-// ===== Burmaldance entertainment pack =====
-bot.hears(/^шар\s+(.{1,300})$/i, async (ctx) => {
-  await requireUser(ctx);
-  const q = ctx.match[1].trim();
-  const answer = magicBallAnswers[randInt(0, magicBallAnswers.length - 1)];
-  await ctx.reply(`🔮 Шар думает над: «${q}»\n\nОтвет: ${answer}.`);
-});
-
-bot.hears(/^выбери\s+(.+)\s+или\s+(.+)$/i, async (ctx) => {
-  await requireUser(ctx);
-  const a = ctx.match[1].trim();
-  const b = ctx.match[2].trim();
-  const choice = Math.random() < 0.5 ? a : b;
-  await ctx.reply(`💬 Я выбираю: ${choice}`);
-});
-
-bot.hears(/^инфа\s+(.{1,300})$/i, async (ctx) => {
-  await requireUser(ctx);
-  const percent = randInt(0, 100);
-  await ctx.reply(`📊 Инфа по «${ctx.match[1].trim()}»: ${percent}%`);
-});
-
-bot.hears(/^испытать\s+удачу$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const now = Date.now();
-  const last = user.last_luck_at ? new Date(user.last_luck_at).getTime() : 0;
-  const hasPotion = Number(user.luck_potions || 0) > 0;
-  if (!hasPotion && last && now - last < 60 * 60 * 1000) {
-    return ctx.reply(`🍀 Удачу можно испытывать раз в час. Осталось: ${formatDuration(60 * 60 * 1000 - (now - last))}`);
-  }
-  const r = Math.random();
-  let reward = 0;
-  let crystals = 0;
-  let text = 'обычная удача';
-  if (r < 0.05) { reward = randInt(250000, 900000); crystals = randInt(1, 5); text = 'джекпот удачи'; }
-  else if (r < 0.35) { reward = randInt(50000, 180000); text = 'хороший занос'; }
-  else if (r < 0.75) { reward = randInt(5000, 35000); text = 'маленький плюс'; }
-  else { reward = -randInt(3000, 25000); text = 'удача решила пошутить'; }
-  const potionSql = hasPotion ? ', luck_potions = luck_potions - 1' : ', last_luck_at = NOW()';
-  await pool.query(`UPDATE users SET foxes = GREATEST(0, foxes + $1), crystals = crystals + $2 ${potionSql} WHERE id=$3`, [reward, crystals, user.id]);
-  await logTx(user.id, 'luck_test', reward, text);
-  await ctx.reply(`🍀 Испытание удачи: ${text}\n\n${reward >= 0 ? '+' : '-'}${money(Math.abs(reward))}${crystals ? `\n+${gems(crystals)}` : ''}${hasPotion ? '\n\n🧪 Потрачен заряд зелья азарта.' : ''}`);
-});
-
-// ===== Marriages =====
-bot.hears(/^свадьба\s+(\d+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const target = await findUserByTgId(ctx.match[1]);
-  if (!target) return ctx.reply('💔 Игрок не найден. Он должен хотя бы раз запустить бота.');
-  if (target.id === user.id) return ctx.reply('💔 Сам с собой? Лис такое не регистрирует.');
-  const busy = await pool.query('SELECT id FROM marriages WHERE user1_id IN ($1,$2) OR user2_id IN ($1,$2)', [user.id, target.id]);
-  if (busy.rows.length) return ctx.reply('💔 Кто-то из вас уже состоит в браке. Сначала развод.');
-  const price = 100000;
-  if (Number(user.foxes) < price) return ctx.reply(`💒 Свадьба стоит ${money(price)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
-  await pool.query('INSERT INTO marriages (user1_id, user2_id) VALUES ($1,$2)', [user.id, target.id]);
-  await logTx(user.id, 'marriage', -price, String(target.tg_id));
-  await ctx.reply(`💖 Свадьба состоялась!\n\n${ctx.from.first_name} теперь в браке с ${target.first_name || target.username || target.tg_id}.`);
-});
-
-bot.hears(/^развод$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const r = await pool.query('DELETE FROM marriages WHERE user1_id=$1 OR user2_id=$1 RETURNING *', [user.id]);
-  if (!r.rows.length) return ctx.reply('💌 У тебя нет брака. Разводиться не с кем.');
-  await ctx.reply('💔 Развод оформлен. Свобода, но с привкусом грусти.');
-});
-
-bot.hears(/^(мой\s+брак|моя\s+свадьба)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const r = await pool.query(`SELECT m.*, u1.first_name a_name, u1.username a_user, u1.tg_id a_tg, u2.first_name b_name, u2.username b_user, u2.tg_id b_tg
-    FROM marriages m JOIN users u1 ON u1.id=m.user1_id JOIN users u2 ON u2.id=m.user2_id
-    WHERE m.user1_id=$1 OR m.user2_id=$1`, [user.id]);
-  if (!r.rows.length) return ctx.reply('💌 Ты пока не в браке. Команда: свадьба ID');
-  const m = r.rows[0];
-  const partner = m.user1_id === user.id ? { name: m.b_name, username: m.b_user, tg: m.b_tg } : { name: m.a_name, username: m.a_user, tg: m.a_tg };
-  await ctx.reply(`💌 Твой брак\n\nПартнер: ${partner.username ? '@' + partner.username : partner.name || partner.tg}\nДата: ${new Date(m.created_at).toLocaleString('ru-RU')}`);
-});
-
-// ===== Multi-case system =====
-bot.hears(/^кейсы$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const inv = await pool.query('SELECT case_id, amount FROM user_cases WHERE user_id=$1 AND amount>0', [user.id]);
-  const owned = Object.fromEntries(inv.rows.map(x => [x.case_id, x.amount]));
-  const list = caseTypes.map(c => `${c.id}. ${c.title} — ${money(c.price)} | у тебя: ${owned[c.id] || 0}`).join('\n');
-  await ctx.reply(`📦 Кейсы\n\n${list}\n\nКоманды:\nкупить кейс 1 5\nоткрыть кейс 1 5`);
-});
-
-bot.hears(/^купить\s+кейс\s+(\d+)\s*(\d+)?$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const caseId = Number(ctx.match[1]);
-  const amount = Math.min(100, Math.max(1, Number(ctx.match[2] || 1)));
-  const c = caseTypes.find(x => x.id === caseId);
-  if (!c) return ctx.reply('❌ Такого кейса нет. Пиши: кейсы');
-  const total = c.price * amount;
-  if (Number(user.foxes) < total) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(total)}`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [total, user.id]);
-  await pool.query(`INSERT INTO user_cases (user_id, case_id, amount) VALUES ($1,$2,$3)
-    ON CONFLICT (user_id, case_id) DO UPDATE SET amount=user_cases.amount+$3`, [user.id, c.id, amount]);
-  await ctx.reply(`🛒 Куплено: ${c.title} x${amount}\nЦена: ${money(total)}`);
-});
-
-bot.hears(/^открыть\s+кейс\s+(\d+)\s*(\d+)?$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const caseId = Number(ctx.match[1]);
-  const amount = Math.min(50, Math.max(1, Number(ctx.match[2] || 1)));
-  const c = caseTypes.find(x => x.id === caseId);
-  if (!c) return ctx.reply('❌ Такого кейса нет. Пиши: кейсы');
-  const own = await pool.query('SELECT amount FROM user_cases WHERE user_id=$1 AND case_id=$2', [user.id, caseId]);
-  if (!own.rows.length || Number(own.rows[0].amount) < amount) return ctx.reply(`❌ У тебя нет столько кейсов. Пиши: кейсы`);
-  const lucky = user.case_luck_until && new Date(user.case_luck_until).getTime() > Date.now();
-  let totalFoxes = 0;
-  let totalCrystals = 0;
-  let jackpots = 0;
-  for (let i = 0; i < amount; i++) {
-    const jackpotChance = c.jackpotChance + (lucky ? 0.04 : 0);
-    if (Math.random() < jackpotChance) {
-      jackpots++;
-      totalFoxes += randInt(c.maxFoxes, c.maxFoxes * 4);
-      totalCrystals += randInt(2, 12);
-    } else {
-      totalFoxes += randInt(c.minFoxes, c.maxFoxes);
-      if (Math.random() < c.crystalChance) totalCrystals += randInt(1, 4);
-    }
-  }
-  await pool.query('UPDATE user_cases SET amount=amount-$1 WHERE user_id=$2 AND case_id=$3', [amount, user.id, caseId]);
-  await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3', [totalFoxes, totalCrystals, user.id]);
-  await logTx(user.id, 'open_cases', totalFoxes, `${c.title} x${amount}`);
-  await ctx.reply(`🔐 Открыто: ${c.title} x${amount}\n\n+${money(totalFoxes)}\n+${gems(totalCrystals)}${jackpots ? `\n\n💥 Джекпотов: ${jackpots}` : ''}${lucky ? '\n🧪 Работало зелье удачи.' : ''}`);
-});
-
-// ===== Passive buildings =====
-bot.hears(/^(построить\s+бизнес|построить\s+генератор|построить\s+ферму|построить\s+карьер|построить\s+участок|построить\s+сад)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const cmd = normalizeRu(ctx.match[1]);
-  const entry = Object.entries(facilityTypes).find(([, cfg]) => normalizeRu(cfg.build) === cmd);
-  if (!entry) return;
-  const [kind, cfg] = entry;
-  const exists = await pool.query('SELECT id FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, kind]);
-  if (exists.rows.length) return ctx.reply(`${cfg.icon} У тебя уже построен ${cfg.title}. Пиши: ${cfg.aliases[0]}`);
-  if (Number(user.foxes) < cfg.price) return ctx.reply(`❌ Не хватает ${CURRENCY}. Постройка стоит ${money(cfg.price)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cfg.price, user.id]);
-  await pool.query(
-    'INSERT INTO facilities (user_id, kind, title, income, last_collect_at, last_tick_at, territory_m2, business_m2, trees_count, water, max_water, tax_limit) VALUES ($1,$2,$3,$4,NOW(),NOW(),$5,$6,$7,$8,$9,$10)',
-    [
-      user.id, kind, cfg.title, cfg.income,
-      kind === 'business' ? BUSINESS.baseTerritory : 120,
-      kind === 'business' ? BUSINESS.baseBusiness : 120,
-      kind === 'garden' ? GARDEN.baseTrees : 0,
-      kind === 'garden' ? GARDEN.maxWater : 0,
-      kind === 'garden' ? GARDEN.maxWater : 0,
-      kind === 'garden' ? GARDEN.taxLimit : (kind === 'farm' ? FARM.taxLimit : 5000000)
-    ]
-  );
-  await logTx(user.id, `build_${kind}`, -cfg.price, cfg.title);
-  await ctx.reply(`${cfg.icon} Построено: ${cfg.title}\n\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
-});
-
-bot.hears(/^(мой\s+бизнес|бизнес|мой\s+генератор|генератор|моя\s+ферма|ферма|мой\s+карьер|карьер|денежное\s+дерево|мое\s+дерево|моё\s+дерево|мой\s+сад|сад)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const text = normalizeRu(ctx.match[1]);
-  const entry = Object.entries(facilityTypes).find(([, cfg]) => cfg.aliases.map(normalizeRu).includes(text));
-  if (!entry) return;
-  const [kind, cfg] = entry;
-  if (kind === 'business') return showBusiness(ctx, user);
-  if (kind === 'farm') return showFarm(ctx, user);
-  if (kind === 'garden') return showGarden(ctx, user);
-  const res = await collectFacilityIncome(user, kind);
-  if (!res.facility) return ctx.reply(`${cfg.icon} ${cfg.title} еще не построен.\n\nКоманда: ${cfg.build}\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
-  await ctx.reply(`${cfg.icon} ${cfg.title}\n\nУровень: ${res.facility.level}\nДоход: ${money(res.facility.income)} раз в ${cfg.intervalHours}ч\n${res.collected ? `\n💰 Собрано: +${money(res.collected)}` : `\n⏳ Следующий сбор через: ${formatDuration(res.waitMs)}`}`);
-});
-
-bot.hears(/^продать\s+(бизнес|генератор|ферму|ферма|карьер|участок|сад)$/i, async (ctx) => {
-  await requireUser(ctx);
-  await ctx.reply('💰 Продажа временно недоступна. Позже можно будет включить выкуп за часть цены.');
-});
-
-
-
-
-bot.hears(/^(бизнес собрать|собрать бизнес)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const amount = Math.floor(Number(business.account || 0));
-  if (amount <= 0) return ctx.reply('💰 Прибыли пока нет. Подожди, пока бизнес накопит деньги.');
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [business.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'business_collect_account', amount, 'business');
-  await ctx.reply(`💰 Собрано с бизнеса: +${money(amount)}`);
-});
-
-bot.hears(/^(бизнес налоги|оплатить налоги бизнеса)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const debt = Math.floor(Number(business.tax_debt || 0));
-  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет.');
-  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [business.id]);
-  await logTx(user.id, 'business_pay_tax', -debt, 'business');
-  await ctx.reply(`🦅 Налоги бизнеса оплачены: ${money(debt)}.`);
-});
-
-bot.hears(/^(увеличить территорию|бизнес территория)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const cost = businessTerritoryUpgradeCost(business);
-  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(cost)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  const r = await pool.query('UPDATE facilities SET territory_m2=territory_m2+1 WHERE id=$1 RETURNING *', [business.id]);
-  await logTx(user.id, 'business_territory_upgrade', -cost, 'business territory');
-  await ctx.reply(`⬆️ Территория увеличена до ${r.rows[0].territory_m2} м²!\n💵 Доход: ${gameCash(businessIncomePerHour(r.rows[0]))}`);
-});
-
-bot.hears(/^(увеличить бизнес|бизнес улучшить)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const cost = businessUpgradeCost(business);
-  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(cost)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  const r = await pool.query('UPDATE facilities SET business_m2=business_m2+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [BUSINESS.taxLimit, business.id]);
-  await logTx(user.id, 'business_upgrade', -cost, 'business area');
-  await ctx.reply(`🆙 Бизнес увеличен до ${r.rows[0].business_m2} м²!\n💵 Доход: ${gameCash(businessIncomePerHour(r.rows[0]))}`);
-});
-
-bot.action('business_collect', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const amount = Math.floor(Number(business.account || 0));
-  if (amount <= 0) return ctx.answerCbQuery('Прибыли пока нет', { show_alert: true });
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [business.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'business_collect_account', amount, 'business');
-  await ctx.reply(`💰 Собрано с бизнеса: +${money(amount)}`);
-  return showBusiness(ctx, user);
-});
-
-bot.action('business_tax', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const debt = Math.floor(Number(business.tax_debt || 0));
-  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
-  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Нужно ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [business.id]);
-  await logTx(user.id, 'business_pay_tax', -debt, 'business');
-  await ctx.reply(`🦅 Налоги бизнеса оплачены: ${money(debt)}.`);
-  return showBusiness(ctx, user);
-});
-
-bot.action('business_territory', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const cost = businessTerritoryUpgradeCost(business);
-  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  await pool.query('UPDATE facilities SET territory_m2=territory_m2+1 WHERE id=$1', [business.id]);
-  await logTx(user.id, 'business_territory_upgrade', -cost, 'business territory');
-  return showBusiness(ctx, user, true);
-});
-
-bot.action('business_upgrade', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let business = await getBusinessFacility(user);
-  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
-  const cost = businessUpgradeCost(business);
-  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  await pool.query('UPDATE facilities SET business_m2=business_m2+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2', [BUSINESS.taxLimit, business.id]);
-  await logTx(user.id, 'business_upgrade', -cost, 'business area');
-  return showBusiness(ctx, user, true);
-});
-
-bot.hears(/^(собрать прибыль|ферма собрать)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const amount = Math.floor(Number(farm.account || 0));
-  if (amount <= 0) return ctx.reply('💰 На счету фермы пока пусто. Подожди, пока накопится прибыль.');
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [farm.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'farm_collect_account', amount, 'mining farm');
-  await ctx.reply(`💰 Собрано с майнинг фермы: +${money(amount)}`);
-});
-
-bot.hears(/^(оплатить налоги|ферма налоги)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const debt = Math.floor(Number(farm.tax_debt || 0));
-  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет. Красота.');
-  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [farm.id]);
-  await logTx(user.id, 'farm_pay_tax', -debt, 'mining farm');
-  await ctx.reply(`🦅 Налоги оплачены: ${money(debt)}.`);
-});
-
-bot.hears(/^(купить видеокарту|ферма видеокарта)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const cards = Number(farm.video_cards || 0);
-  const max = farmMaxCards(farm.level);
-  if (cards >= max) return ctx.reply(`📝 Слоты закончились: ${cards}/${max}. Сначала улучши ферму.`);
-  const price = Math.floor(FARM.videoCardPrice * (1 + cards * 0.08));
-  if (Number(user.foxes) < price) return ctx.reply(`❌ Не хватает ${CURRENCY}. Видеокарта стоит ${money(price)}.`);
-  const r = await pool.query('UPDATE facilities SET video_cards=video_cards+1 WHERE id=$1 RETURNING *', [farm.id]);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
-  await logTx(user.id, 'farm_buy_card', -price, 'video card');
-  await ctx.reply(`🔼 Видеокарта куплена!\n\n📝 Теперь: ${r.rows[0].video_cards}/${farmMaxCards(r.rows[0].level)}\n🏭 Доход: ${farmIncomePerHour(r.rows[0]).toLocaleString('ru-RU')}/час`);
-});
-
-bot.hears(/^(улучшить ферму|ферма улучшить)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const cost = farmUpgradeCost(farm.level);
-  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Улучшение стоит ${money(cost)}.`);
-  const r = await pool.query('UPDATE facilities SET level=level+1, max_video_cards=max_video_cards+10, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [FARM.taxLimit, farm.id]);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  await logTx(user.id, 'farm_upgrade', -cost, 'mining farm');
-  await ctx.reply(`⬆️ Ферма улучшена до ${r.rows[0].level} уровня!\n\n📝 Слоты: ${farmMaxCards(r.rows[0].level)}\n🏭 Доход: ${farmIncomePerHour(r.rows[0]).toLocaleString('ru-RU')}/час`);
-});
-
-bot.action('farm_collect', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const amount = Math.floor(Number(farm.account || 0));
-  if (amount <= 0) return ctx.answerCbQuery('На счету пока пусто', { show_alert: true });
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [farm.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'farm_collect_account', amount, 'mining farm');
-  await ctx.reply(`💰 Собрано с майнинг фермы: +${money(amount)}`);
-  return showFarm(ctx, user);
-});
-
-bot.action('farm_tax', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const debt = Math.floor(Number(farm.tax_debt || 0));
-  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
-  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Не хватает. Нужно: ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [farm.id]);
-  await logTx(user.id, 'farm_pay_tax', -debt, 'mining farm');
-  await ctx.reply(`🦅 Налоги оплачены: ${money(debt)}.`);
-  return showFarm(ctx, user);
-});
-
-bot.action('farm_card', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const cards = Number(farm.video_cards || 0);
-  const max = farmMaxCards(farm.level);
-  if (cards >= max) return ctx.answerCbQuery('Слоты закончились. Улучши ферму.', { show_alert: true });
-  const price = Math.floor(FARM.videoCardPrice * (1 + cards * 0.08));
-  if (Number(user.foxes) < price) return ctx.answerCbQuery(`Нужно ${price.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
-  await pool.query('UPDATE facilities SET video_cards=video_cards+1 WHERE id=$1', [farm.id]);
-  await logTx(user.id, 'farm_buy_card', -price, 'video card');
-  return showFarm(ctx, user, true);
-});
-
-bot.action('farm_upgrade', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  let farm = await getFarm(user);
-  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
-  const cost = farmUpgradeCost(farm.level);
-  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  await pool.query('UPDATE facilities SET level=level+1, max_video_cards=max_video_cards+10, tax_limit=tax_limit+$1 WHERE id=$2', [FARM.taxLimit, farm.id]);
-  await logTx(user.id, 'farm_upgrade', -cost, 'mining farm');
-  return showFarm(ctx, user, true);
-});
-
-// ===== Garden and potions =====
-bot.hears(/^(сад\s+полить|полить\s+сад)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const last = user.garden_watered_at ? new Date(user.garden_watered_at).getTime() : 0;
-  if (last && Date.now() - last < 60 * 60 * 1000) return ctx.reply(`💦 Сад уже полит. Следующий полив через ${formatDuration(60 * 60 * 1000 - (Date.now() - last))}.`);
-  const water = Math.min(GARDEN.maxWater, Number(garden.water || 0) + 35);
-  const reward = Math.random() < 0.35 ? randInt(1, 2) : 0;
-  await pool.query('UPDATE facilities SET water=$1 WHERE id=$2', [water, garden.id]);
-  await pool.query('UPDATE users SET garden_watered_at=NOW(), crystals=crystals+$1 WHERE id=$2', [reward, user.id]);
-  await ctx.reply(`💦 Сад полит.\n\nВоды: ${water}/${GARDEN.maxWater}${reward ? `\n+${gems(reward)} для зелий.` : ''}`);
-});
-
-bot.hears(/^(сад\s+собрать|собрать\s+сад)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const amount = Math.floor(Number(garden.account || 0));
-  if (amount <= 0) return ctx.reply('💰 На счету сада пока пусто. Поливай сад и подожди, пока накопится прибыль.');
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [garden.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'garden_collect_account', amount, 'garden');
-  await ctx.reply(`💰 Собрано с сада: +${money(amount)}`);
-});
-
-bot.hears(/^(сад\s+налоги|оплатить\s+налоги\s+сада)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const debt = Math.floor(Number(garden.tax_debt || 0));
-  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет. Красота.');
-  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [garden.id]);
-  await logTx(user.id, 'garden_pay_tax', -debt, 'garden');
-  await ctx.reply(`🦅 Налоги сада оплачены: ${money(debt)}.`);
-});
-
-bot.hears(/^(купить\s+дерево|сад\s+дерево)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const cost = gardenTreeCost(garden);
-  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Дерево стоит ${money(cost)}.`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  const r = await pool.query('UPDATE facilities SET trees_count=trees_count+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [GARDEN.taxLimit, garden.id]);
-  await logTx(user.id, 'garden_buy_tree', -cost, 'tree');
-  await ctx.reply(`⬆️ Дерево куплено!\n\n🌳 Деревья: ${gardenTrees(r.rows[0])} шт.\n🥐 Доход: ${gameCash(gardenIncomePerHour(r.rows[0]))}`);
-});
-
-bot.action('garden_collect', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const amount = Math.floor(Number(garden.account || 0));
-  if (amount <= 0) return ctx.answerCbQuery('На счету пока пусто', { show_alert: true });
-  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [garden.id]);
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
-  await logTx(user.id, 'garden_collect_account', amount, 'garden');
-  await ctx.reply(`💰 Собрано с сада: +${money(amount)}`);
-  return showGarden(ctx, user);
-});
-
-bot.action('garden_tax', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const debt = Math.floor(Number(garden.tax_debt || 0));
-  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
-  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Нужно ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
-  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [garden.id]);
-  await logTx(user.id, 'garden_pay_tax', -debt, 'garden');
-  await ctx.reply(`🦅 Налоги сада оплачены: ${money(debt)}.`);
-  return showGarden(ctx, user);
-});
-
-bot.action('garden_tree', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const cost = gardenTreeCost(garden);
-  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
-  await pool.query('UPDATE facilities SET trees_count=trees_count+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2', [GARDEN.taxLimit, garden.id]);
-  await logTx(user.id, 'garden_buy_tree', -cost, 'tree');
-  return showGarden(ctx, user, true);
-});
-
-bot.action('garden_water', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await requireUser(ctx);
-  const garden = await getGarden(user);
-  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
-  const last = user.garden_watered_at ? new Date(user.garden_watered_at).getTime() : 0;
-  if (last && Date.now() - last < 60 * 60 * 1000) return ctx.answerCbQuery(`Полить можно через ${formatDuration(60 * 60 * 1000 - (Date.now() - last))}`, { show_alert: true });
-  const water = Math.min(GARDEN.maxWater, Number(garden.water || 0) + 35);
-  await pool.query('UPDATE facilities SET water=$1 WHERE id=$2', [water, garden.id]);
-  await pool.query('UPDATE users SET garden_watered_at=NOW() WHERE id=$1', [user.id]);
-  return showGarden(ctx, user, true);
-});
-
-bot.hears(/^зелья$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const list = potionTypes.map(p => `${p.id}. ${p.title} — ${p.cost} ${GEM}\n   ${p.description}`).join('\n');
-  await ctx.reply(`🍸 Зелья\n\n${list}\n\nУ тебя: ${gems(user.crystals)}\nКоманда: создать зелье 1`);
-});
-
-bot.hears(/^создать\s+зелье\s+(\d+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const potion = potionTypes.find(p => p.id === Number(ctx.match[1]));
-  if (!potion) return ctx.reply('❌ Такого зелья нет. Пиши: зелья');
-  const { facility } = await ensureFacility(user, 'garden');
-  if (!facility) return ctx.reply('🌳 Для зелий нужен сад. Команда: построить сад');
-  if (Number(user.crystals) < potion.cost) return ctx.reply(`❌ Нужно ${potion.cost} ${GEM}.`);
-  if (potion.effect === 'case_luck') {
-    await pool.query('UPDATE users SET crystals=crystals-$1, case_luck_until=$2 WHERE id=$3', [potion.cost, nowPlusHours(2), user.id]);
-  } else if (potion.effect === 'income_boost') {
-    await pool.query('UPDATE users SET crystals=crystals-$1, income_boost_until=$2 WHERE id=$3', [potion.cost, nowPlusHours(2), user.id]);
-  } else {
-    await pool.query('UPDATE users SET crystals=crystals-$1, luck_potions=luck_potions+3 WHERE id=$2', [potion.cost, user.id]);
-  }
-  await ctx.reply(`🔮 Создано: ${potion.title}\nЭффект: ${potion.description}`);
-});
-
-
-bot.hears(/^(баланс|профиль|profile)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const inv = await pool.query('SELECT item_type, COUNT(*) c FROM inventory WHERE user_id=$1 GROUP BY item_type', [user.id]);
-  const items = Object.fromEntries(inv.rows.map(x => [x.item_type, x.c]));
-  await ctx.reply(`👤 ${ctx.from.first_name}
-
-💰 Баланс: ${money(user.foxes)}
-🏦 Банк: ${money(user.bank)}
-💎 ${gems(user.crystals)}
-⭐ VIP: ${user.vip_level}
-📈 Уровень: ${user.level} | XP: ${user.xp}
-⚡ Энергия: ${user.energy}/10
-
-🏢 Бизнесов: ${items.business || 0}
-🏠 Домов: ${items.house || 0}
-🚗 Машин: ${items.car || 0}`);
-});
-
-bot.hears(/^бонус$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const now = Date.now();
-  const last = user.last_bonus_at ? new Date(user.last_bonus_at).getTime() : 0;
-  if (last && now - last < 24 * 60 * 60 * 1000) return ctx.reply('⏳ Бонус уже забран. Следующий доступен через 24 часа после прошлого.');
-  const reward = 25000 + Number(user.level) * 1500 + Number(user.vip_level) * 10000;
-  const crystals = Math.random() < 0.2 ? 1 : 0;
-  await pool.query('UPDATE users SET foxes = foxes + $1, crystals = crystals + $2, last_bonus_at = NOW() WHERE id=$3', [reward, crystals, user.id]);
-  await logTx(user.id, 'daily_bonus', reward, 'daily');
-  const lvl = await addXp(user.id, 80);
-  await ctx.reply(`🎁 Ежедневный бонус!
-
-+${money(reward)}${crystals ? `
-+${gems(crystals)}` : ''}${lvl ? `
-
-🔥 Новый уровень: ${lvl}` : ''}`);
-});
-
-bot.hears(/^работа$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const now = Date.now();
-  const last = user.last_work_at ? new Date(user.last_work_at).getTime() : 0;
-  if (last && now - last < 10 * 60 * 1000) return ctx.reply('⏳ Работать можно раз в 10 минут. Лис устал, дайте ему водички.');
-  const reward = randInt(5000, 18000) + Number(user.level) * 1200;
-  await pool.query('UPDATE users SET foxes=foxes+$1, last_work_at=NOW() WHERE id=$2', [reward, user.id]);
-  await logTx(user.id, 'work', reward);
-  const lvl = await addXp(user.id, 120);
-  await ctx.reply(`🧰 Ты подработал в BlackFox-сети.
-
-+${money(reward)}${lvl ? `
-🔥 Новый уровень: ${lvl}` : ''}`);
-});
-
-bot.hears(/^банк$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  await ctx.reply(`🏦 BlackFox Bank
-
-На руках: ${money(user.foxes)}
-В банке: ${money(user.bank)}
-
-Команды:
-банк положить 1000
-банк снять 1000
-банк положить все`);
-});
-
-bot.hears(/^банк\s+(положить|деп|deposit)\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const amount = parseAmount(ctx.match[2], user);
-  if (!amount || amount < 1) return ctx.reply('❌ Укажи сумму: банк положить 1000');
-  if (Number(user.foxes) < amount) return ctx.reply('❌ Не хватает Фоксов на руках.');
-  await pool.query('UPDATE users SET foxes=foxes-$1, bank=bank+$1 WHERE id=$2', [amount, user.id]);
-  await ctx.reply(`🏦 В банк положено: ${money(amount)}`);
-});
-
-bot.hears(/^банк\s+(снять|вывести|withdraw)\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const bankUser = { ...user, foxes: user.bank };
-  const amount = parseAmount(ctx.match[2], bankUser);
-  if (!amount || amount < 1) return ctx.reply('❌ Укажи сумму: банк снять 1000');
-  if (Number(user.bank) < amount) return ctx.reply('❌ В банке нет столько Фоксов.');
-  await pool.query('UPDATE users SET foxes=foxes+$1, bank=bank-$1 WHERE id=$2', [amount, user.id]);
-  await ctx.reply(`🏦 Снято из банка: ${money(amount)}`);
-});
-
-bot.hears(/^казино(?:\s+(.+))?$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const raw = ctx.match[1];
-  if (!raw || raw.toLowerCase() === 'инфо') {
-    return ctx.reply(`🎰 BlackFox Casino
-
-Команды:
-казино 1000
-казино все
-казино половина
-
-Шансы:
-💎 x5 — 3%
-🔥 x3 — 8%
-🎰 x2 — 31%
-💸 проигрыш — 58%
-
-Ставки только виртуальными Фоксами.`);
-  }
-  const bet = parseAmount(raw, user);
-  if (!bet || bet < 100) return ctx.reply('❌ Минимальная ставка: 100 Фоксов.');
-  if (bet > Number(user.foxes)) return ctx.reply('❌ Недостаточно Фоксов.');
-  const r = Math.random();
-  let multiplier = 0;
-  if (r < 0.03) multiplier = 5;
-  else if (r < 0.11) multiplier = 3;
-  else if (r < 0.42) multiplier = 2;
-  const delta = multiplier ? bet * (multiplier - 1) : -bet;
-  await pool.query('UPDATE users SET foxes = foxes + $1 WHERE id=$2', [delta, user.id]);
-  await logTx(user.id, 'casino', delta, `bet=${bet};x=${multiplier}`);
-  await addXp(user.id, Math.min(250, Math.floor(bet / 1000) + 25));
-  if (!multiplier) return ctx.reply(`💸 Казино съело ставку.
-
-Ставка: ${money(bet)}
-Проигрыш: ${money(bet)}`);
-  await ctx.reply(`🎰 JACKFOX!
-
-Ставка: ${money(bet)}
-Множитель: x${multiplier}
-Выигрыш: ${money(bet * multiplier)}
-Чистая прибыль: ${money(delta)}`);
-});
-
-bot.hears(/^монетка\s+(.+)\s+(орел|орёл|решка)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const bet = parseAmount(ctx.match[1], user);
-  const choice = ctx.match[2].toLowerCase().replace('ё', 'е');
-  if (!bet || bet < 100) return ctx.reply('❌ Минимальная ставка: 100 Фоксов.');
-  if (bet > Number(user.foxes)) return ctx.reply('❌ Недостаточно Фоксов.');
-  const result = Math.random() < 0.5 ? 'орел' : 'решка';
-  const win = result === choice;
-  const delta = win ? bet : -bet;
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [delta, user.id]);
-  await logTx(user.id, 'coin', delta, result);
-  await ctx.reply(`🪙 Выпало: ${result}
-
-${win ? `✅ Победа: +${money(bet)}` : `❌ Проигрыш: -${money(bet)}`}`);
-});
-
-bot.hears(/^кубик\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const bet = parseAmount(ctx.match[1], user);
-  if (!bet || bet < 100) return ctx.reply('❌ Минимальная ставка: 100 Фоксов.');
-  if (bet > Number(user.foxes)) return ctx.reply('❌ Недостаточно Фоксов.');
-  const roll = randInt(1, 6);
-  const multiplier = roll === 6 ? 4 : roll >= 4 ? 2 : 0;
-  const delta = multiplier ? bet * (multiplier - 1) : -bet;
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [delta, user.id]);
-  await logTx(user.id, 'dice', delta, `roll=${roll}`);
-  await ctx.reply(`🎲 Выпало: ${roll}
-
-${multiplier ? `✅ Множитель x${multiplier}, прибыль: ${money(delta)}` : `❌ Проигрыш: ${money(bet)}`}`);
-});
-
-bot.hears(/^кейс$/i, async (ctx) => {
-  await requireUser(ctx);
-  await ctx.reply(`📦 BlackFox Case
-
-Команда: кейс купить
-Цена: 10 ${GEM}
-
-Может выпасть:
-• 25 000–150 000 Фоксов
-• 1–10 Кристаллов
-• редкий jackpot`);
-});
-
-bot.hears(/^кейс\s+купить$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  if (Number(user.crystals) < 10) return ctx.reply(`❌ Нужно 10 ${GEM}.`);
-  const r = Math.random();
-  let foxReward = randInt(25000, 150000);
-  let crystalReward = 0;
-  let label = 'обычный дроп';
-  if (r < 0.07) { foxReward = randInt(500000, 1500000); crystalReward = randInt(5, 15); label = '💎 редкий jackpot'; }
-  else if (r < 0.25) { crystalReward = randInt(1, 10); label = '✨ кристальный дроп'; }
-  await pool.query('UPDATE users SET crystals=crystals-10+$1, foxes=foxes+$2 WHERE id=$3', [crystalReward, foxReward, user.id]);
-  await logTx(user.id, 'case', foxReward, label);
-  await ctx.reply(`📦 Кейс открыт: ${label}
-
-+${money(foxReward)}${crystalReward ? `
-+${gems(crystalReward)}` : ''}`);
-});
-
-bot.hears(/^магазин$/i, async (ctx) => {
-  await requireUser(ctx);
-  const b = businesses.map(x => `${x.id}. ${x.title} — ${money(x.price)} | доход ${money(x.income)}/12ч`).join('\n');
-  const h = houses.map(x => `${x.id}. ${x.title} — ${money(x.price)}`).join('\n');
-  const c = cars.map(x => `${x.id}. ${x.title} — ${money(x.price)}`).join('\n');
-  await ctx.reply(`🛒 Магазин ${BOT_NAME}
-
-🏢 Бизнесы:
-${b}
-
-🏠 Дома:
-${h}
-
-🚗 Машины:
-${c}
-
-Команды:
-купить бизнес 1
-купить дом 1
-купить машина 1`);
-});
-
-async function buyItem(ctx, type, list, id) {
-  const user = await requireUser(ctx);
-  const item = list.find(x => x.id === Number(id));
-  if (!item) return ctx.reply('❌ Такого товара нет. Открой магазин.');
-  if (Number(user.foxes) < item.price) return ctx.reply(`❌ Не хватает Фоксов. Нужно: ${money(item.price)}`);
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [item.price, user.id]);
-  await pool.query('INSERT INTO inventory (user_id, item_type, item_id, title, income) VALUES ($1,$2,$3,$4,$5)', [user.id, type, item.id, item.title, item.income || 0]);
-  await logTx(user.id, `buy_${type}`, -item.price, item.title);
-  await ctx.reply(`✅ Куплено: ${item.title}
-Цена: ${money(item.price)}`);
-}
-
-bot.hears(/^купить\s+бизнес\s+(\d+)$/i, async (ctx) => buyItem(ctx, 'business', businesses, ctx.match[1]));
-bot.hears(/^купить\s+дом\s+(\d+)$/i, async (ctx) => buyItem(ctx, 'house', houses, ctx.match[1]));
-bot.hears(/^купить\s+(машина|тачка)\s+(\d+)$/i, async (ctx) => buyItem(ctx, 'car', cars, ctx.match[2]));
-
-bot.hears(/^мои\s+купленные\s+бизнесы$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const r = await pool.query('SELECT title, income FROM inventory WHERE user_id=$1 AND item_type=$2', [user.id, 'business']);
-  if (!r.rows.length) return ctx.reply('🏢 У тебя пока нет бизнесов. Пиши: магазин');
-  const total = r.rows.reduce((s, x) => s + Number(x.income), 0);
-  await ctx.reply(`🏢 Твои бизнесы:
-
-${r.rows.map((x, i) => `${i + 1}. ${x.title} — ${money(x.income)}/12ч`).join('\n')}
-
-Общий доход: ${money(total)}/12ч
-Команда: собрать`);
-});
-
-bot.hears(/^собрать$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const last = user.last_collect_at ? new Date(user.last_collect_at).getTime() : 0;
-  const now = Date.now();
-  if (last && now - last < 12 * 60 * 60 * 1000) return ctx.reply('⏳ Доход с бизнесов можно собирать раз в 12 часов.');
-  const r = await pool.query('SELECT COALESCE(SUM(income),0) total FROM inventory WHERE user_id=$1 AND item_type=$2', [user.id, 'business']);
-  const total = Number(r.rows[0].total || 0);
-  if (!total) return ctx.reply('🏢 У тебя нет бизнесов для сбора дохода.');
-  await pool.query('UPDATE users SET foxes=foxes+$1, last_collect_at=NOW() WHERE id=$2', [total, user.id]);
-  await logTx(user.id, 'business_collect', total);
-  await ctx.reply(`💼 Доход собран: +${money(total)}`);
-});
-
-bot.hears(/^передать\s+(@\w+)\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const target = await findUserByMention(ctx.match[1]);
-  const amount = parseAmount(ctx.match[2], user);
-  if (!target) return ctx.reply('❌ Этот игрок еще не запускал бота или у него нет username.');
-  if (target.id === user.id) return ctx.reply('❌ Себе переводить нельзя. Хотя попытка уверенная.');
-  if (!amount || amount < 100) return ctx.reply('❌ Минимальный перевод: 100 Фоксов.');
-  if (amount > Number(user.foxes)) return ctx.reply('❌ Недостаточно Фоксов.');
-  await pool.query('BEGIN');
-  try {
-    await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [amount, user.id]);
-    await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, target.id]);
-    await pool.query('COMMIT');
-    await ctx.reply(`✅ Перевод выполнен: @${target.username} получил ${money(amount)}`);
-  } catch (e) { await pool.query('ROLLBACK'); throw e; }
-});
-
-bot.hears(/^промо\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const code = ctx.match[1].trim().replace('#', '');
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const promoRes = await client.query('SELECT * FROM promo_codes WHERE LOWER(code)=LOWER($1) FOR UPDATE', [code]);
-    const promo = promoRes.rows[0];
-    if (!promo) { await client.query('ROLLBACK'); return ctx.reply('❌ Такого промокода нет.'); }
-    if (Number(promo.activations) >= Number(promo.max_activations)) { await client.query('ROLLBACK'); return ctx.reply('😢 Активации промокода закончились.'); }
-    const used = await client.query('SELECT id FROM promo_activations WHERE promo_id=$1 AND user_id=$2', [promo.id, user.id]);
-    if (used.rows.length) { await client.query('ROLLBACK'); return ctx.reply('⚠️ Ты уже активировал этот промокод.'); }
-    await client.query('INSERT INTO promo_activations (promo_id,user_id) VALUES ($1,$2)', [promo.id, user.id]);
-    await client.query('UPDATE promo_codes SET activations=activations+1 WHERE id=$1', [promo.id]);
-    await client.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3', [promo.reward_foxes, promo.reward_crystals, user.id]);
-    await client.query('COMMIT');
-    await ctx.reply(`✅ Промокод активирован!
-
-+${money(promo.reward_foxes)}
-+${gems(promo.reward_crystals)}
-
-Осталось активаций: ${Number(promo.max_activations) - Number(promo.activations) - 1}`);
-  } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-});
-
-bot.hears(/^топ$/i, async (ctx) => {
-  await requireUser(ctx);
-  const r = await pool.query('SELECT username, first_name, foxes, bank FROM users ORDER BY (foxes + bank) DESC LIMIT 10');
-  const text = r.rows.map((u, i) => `${i + 1}. ${u.username ? '@' + u.username : u.first_name || 'Игрок'} — ${money(Number(u.foxes) + Number(u.bank))}`).join('\n');
-  await ctx.reply(`🏆 Топ богачей:
-
-${text || 'Пока пусто.'}`);
-});
-
-bot.hears(/^реф$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const botUsername = process.env.BOT_USERNAME || 'YOUR_BOT_USERNAME';
-  const r = await pool.query('SELECT COUNT(*) c FROM users WHERE referrer_id=$1', [user.id]);
-  await ctx.reply(`👥 Рефералка
-
-За каждого друга: 15 000 Фоксов + 5 Кристаллов.
-Приглашено: ${r.rows[0].c}
-
-https://t.me/${botUsername}?start=ref_${ctx.from.id}`);
-});
-
-bot.hears(/^клан$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const r = await pool.query('SELECT c.*, cm.role FROM clans c JOIN clan_members cm ON cm.clan_id=c.id WHERE cm.user_id=$1', [user.id]);
-  if (!r.rows.length) return ctx.reply(`🛡 У тебя нет клана.
-
-Команды:
-клан создать Название
-клан вступить ID
-топ кланы`);
-  const c = r.rows[0];
-  const count = await pool.query('SELECT COUNT(*) c FROM clan_members WHERE clan_id=$1', [c.id]);
-  await ctx.reply(`🛡 Клан #${c.id}: ${c.title}
-Роль: ${c.role}
-Участников: ${count.rows[0].c}
-Казна: ${money(c.bank)}
-XP: ${c.xp}
-
-Команда: клан донат 1000`);
-});
-
-bot.hears(/^клан\s+создать\s+(.{3,32})$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const title = ctx.match[1].trim();
-  const exists = await pool.query('SELECT id FROM clan_members WHERE user_id=$1', [user.id]);
-  if (exists.rows.length) return ctx.reply('❌ Ты уже в клане.');
-  if (Number(user.foxes) < 250000) return ctx.reply(`❌ Создание клана стоит ${money(250000)}.`);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query('UPDATE users SET foxes=foxes-250000 WHERE id=$1', [user.id]);
-    const c = await client.query('INSERT INTO clans (title, owner_user_id) VALUES ($1,$2) RETURNING *', [title, user.id]);
-    await client.query('INSERT INTO clan_members (clan_id,user_id,role) VALUES ($1,$2,$3)', [c.rows[0].id, user.id, 'owner']);
-    await client.query('COMMIT');
-    await ctx.reply(`🛡 Клан создан!
-
-#${c.rows[0].id} ${title}`);
-  } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-});
-
-bot.hears(/^клан\s+вступить\s+(\d+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const exists = await pool.query('SELECT id FROM clan_members WHERE user_id=$1', [user.id]);
-  if (exists.rows.length) return ctx.reply('❌ Ты уже в клане.');
-  const c = await pool.query('SELECT * FROM clans WHERE id=$1', [Number(ctx.match[1])]);
-  if (!c.rows.length) return ctx.reply('❌ Клан не найден.');
-  await pool.query('INSERT INTO clan_members (clan_id,user_id) VALUES ($1,$2)', [c.rows[0].id, user.id]);
-  await ctx.reply(`✅ Ты вступил в клан: ${c.rows[0].title}`);
-});
-
-bot.hears(/^клан\s+донат\s+(.+)$/i, async (ctx) => {
-  const user = await requireUser(ctx);
-  const amount = parseAmount(ctx.match[1], user);
-  if (!amount || amount < 1000) return ctx.reply('❌ Минимальный донат в клан: 1000 Фоксов.');
-  if (amount > Number(user.foxes)) return ctx.reply('❌ Недостаточно Фоксов.');
-  const m = await pool.query('SELECT clan_id FROM clan_members WHERE user_id=$1', [user.id]);
-  if (!m.rows.length) return ctx.reply('❌ Ты не в клане.');
-  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [amount, user.id]);
-  await pool.query('UPDATE clans SET bank=bank+$1, xp=xp+$2 WHERE id=$3', [amount, Math.floor(amount / 1000), m.rows[0].clan_id]);
-  await ctx.reply(`🛡 В казну клана отправлено: ${money(amount)}`);
-});
-
-bot.hears(/^топ\s+кланы$/i, async (ctx) => {
-  await requireUser(ctx);
-  const r = await pool.query('SELECT id,title,bank,xp FROM clans ORDER BY (bank + xp * 1000) DESC LIMIT 10');
-  const text = r.rows.map((c, i) => `${i + 1}. #${c.id} ${c.title} — казна ${money(c.bank)}, XP ${c.xp}`).join('\n');
-  await ctx.reply(`🛡 Топ кланов:
-
-${text || 'Кланов пока нет.'}`);
-});
-
-bot.command('adm_stats', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const u = await pool.query('SELECT COUNT(*) c, COALESCE(SUM(foxes),0) s FROM users');
-  const c = await pool.query('SELECT COUNT(*) c FROM clans');
-  await ctx.reply(`📊 Статистика
-
-Игроков: ${u.rows[0].c}
-Фоксов на руках: ${money(u.rows[0].s)}
-Кланов: ${c.rows[0].c}`);
-});
-
-bot.command('adm_promo', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const [, code, foxes, crystals, max] = parts;
-  if (!code || !foxes || !crystals || !max) return ctx.reply('/adm_promo CODE FOXES CRYSTALS MAX');
-  await pool.query(`INSERT INTO promo_codes (code,reward_foxes,reward_crystals,max_activations) VALUES ($1,$2,$3,$4)
-    ON CONFLICT (code) DO UPDATE SET reward_foxes=$2,reward_crystals=$3,max_activations=$4`, [code, Number(foxes), Number(crystals), Number(max)]);
-  await ctx.reply(`✅ Промо создан/обновлен: ${code}`);
-});
-
-bot.command('adm_give', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const [, mention, amountRaw] = parts;
-  const amount = Number(amountRaw);
-  if (!mention || !amount) return ctx.reply('/adm_give @username 100000');
-  const target = await findUserByMention(mention);
-  if (!target) return ctx.reply('Игрок не найден.');
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, target.id]);
-  await ctx.reply(`✅ Выдано @${target.username}: ${money(amount)}`);
-});
-
-bot.command('adm_give_id', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const [, tgId, amountRaw] = parts;
-  const amount = Number(amountRaw);
-  if (!tgId || !amount) return ctx.reply('/adm_give_id 123456789 100000');
-  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE tg_id=$2', [amount, Number(tgId)]);
-  await ctx.reply(`✅ Выдано tg_id ${tgId}: ${money(amount)}`);
-});
-
-bot.catch((err, ctx) => {
-  console.error('Bot error:', err);
-  ctx.reply('⚠️ Ошибка. Попробуй еще раз или напиши админу.').catch(() => {});
-});
-
+bot.start(async ctx=>{ if(isGroup(ctx)) return sendGroupWelcome(ctx); return sendPrivateWelcome(ctx); });
+bot.on('new_chat_members', async ctx=>{ const me=await ctx.telegram.getMe(); const addedBot=ctx.message.new_chat_members.some(m=>m.id===me.id); if(addedBot) return sendGroupWelcome(ctx); });
+bot.on('my_chat_member', async ctx=>{ const s=ctx.myChatMember?.new_chat_member?.status; if(isGroup(ctx) && ['member','administrator'].includes(s)) return sendGroupWelcome(ctx); });
+bot.command(['help','menu'], sendHelp);
+bot.command(['profile','me'], sendProfile);
+bot.command(['balance','bal'], sendBalance);
+bot.command(['top','leaders'], ctx=>sendTop(ctx));
+bot.command(['chat_top'], ctx=>sendTop(ctx,'🏆 Топ чата'));
+bot.command(['casino','kazik'], runSlashCasino);
+bot.action('group_help', sendGroupHelp);
+bot.action('group_top', ctx=>sendTop(ctx,'🏆 Топ чата'));
+bot.action('menu_profile', sendProfile);
+bot.action('menu_balance', sendBalance);
+bot.action('menu_games', ctx=>ctx.reply(`🎰 Игры\n\nказино 1000\nказино все\nмины 1000\nмонетка 1000 орел\nкубик 1000`));
+bot.action('menu_buildings', ctx=>ctx.reply(`🏗 Постройки\n\nбизнес\nферма\nсад\nгенератор\nкарьер\nденежное дерево`));
+bot.action('menu_cases', ctx=>ctx.reply(`📦 Кейсы\n\nНапиши: кейсы`));
+bot.action('menu_clans', ctx=>ctx.reply(`🏰 Кланы\n\nклан\nклан создать Название\nклан донат 1000\nклан улучшить`));
+bot.hears(/^помощь$/i, sendHelp);
+
+bot.hears(/^(профиль|кто я)$/i, sendProfile);
+bot.hears(/^баланс$/i, sendBalance);
+bot.hears(/^реф$/i, async ctx=>{ const u=await requireUser(ctx); const me=await ctx.telegram.getMe(); const c=await pool.query('SELECT COUNT(*) FROM users WHERE referrer_id=$1',[u.id]); await ctx.reply(`🔗 Твоя реф-ссылка:\nhttps://t.me/${me.username}?start=ref_${u.tg_id}\n\n👥 Рефералов: ${c.rows[0].count}\n🎁 За рефа: 50.000 Фоксов + 1 Кристалл`); });
+
+bot.hears(/^бонус$/i, async ctx=>{ const u=await requireUser(ctx); if(u.last_bonus_at && now()-new Date(u.last_bonus_at)<86400000) return ctx.reply('⏳ Бонус уже забран. Приходи позже.'); const reward=50000+u.level*2500+(u.vip_level*15000); await pool.query('UPDATE users SET foxes=foxes+$1,last_bonus_at=NOW() WHERE id=$2',[reward,u.id]); await addXp(u.id,80); await markDaily(u.id,'bonus_done'); await ctx.reply(`🎁 Ежедневный бонус: ${m(reward)}\n⚡ +80 XP`); });
+bot.hears(/^работа$/i, async ctx=>{ const u=await requireUser(ctx); if(u.last_work_at && now()-new Date(u.last_work_at)<3600000) return ctx.reply('⏳ Работать можно раз в час.'); const reward=rnd(8000,35000)+u.level*1000; await pool.query('UPDATE users SET foxes=foxes+$1,last_work_at=NOW() WHERE id=$2',[reward,u.id]); await addXp(u.id,50); await ctx.reply(`🧰 Ты поработал и получил ${m(reward)}\n⚡ +50 XP`); });
+
+bot.hears(/^задания$/i, async ctx=>{ const u=await requireUser(ctx); const d=await daily(u.id); const done=[d.bonus_done,d.casino_count>=5,d.collect_done,d.garden_done,d.case_done].filter(Boolean).length; const txt=`📋 Задания на сегодня\n\n1. Забрать бонус — ${d.bonus_done?'✅':'❌'}\n2. Сыграть в казино 5 раз — ${d.casino_count}/5\n3. Собрать прибыль — ${d.collect_done?'✅':'❌'}\n4. Полить сад — ${d.garden_done?'✅':'❌'}\n5. Открыть кейс — ${d.case_done?'✅':'❌'}\n\nНаграда: 150.000 Фоксов + 5 Кристаллов\nГотово: ${done}/5`; await ctx.reply(txt, Markup.inlineKeyboard([[Markup.button.callback('🎁 Забрать награду','daily_claim')]])); });
+bot.action('daily_claim', async ctx=>{ const u=await requireUser(ctx); const d=await daily(u.id); if(d.claimed) return ctx.answerCbQuery('Уже забрано'); if(!(d.bonus_done && d.casino_count>=5 && d.collect_done && d.garden_done && d.case_done)) return ctx.answerCbQuery('Не все задания выполнены'); await pool.query('UPDATE daily_progress SET claimed=TRUE WHERE user_id=$1 AND day=CURRENT_DATE',[u.id]); await pool.query('UPDATE users SET foxes=foxes+150000, crystals=crystals+5 WHERE id=$1',[u.id]); await addXp(u.id,300); await ctx.editMessageText('🎁 Награда за задания получена: 150.000 Фоксов + 5 Кристаллов + 300 XP'); });
+
+bot.hears(/^(pass|пас|пропуск)$/i, async ctx=>{ const u=await requireUser(ctx); const lvl=Math.min(50,Math.floor(u.pass_xp/500)+1); await ctx.reply(`🎫 Fox Pass\n\nУровень: ${lvl}/50\nОпыт пропуска: ${u.pass_xp}\nPremium: ${u.pass_premium?'✅':'❌'}\n\nКаждый уровень можно забрать кнопкой.`, Markup.inlineKeyboard([[Markup.button.callback('🎁 Забрать free','pass_free'),Markup.button.callback('💎 Забрать premium','pass_premium')],[Markup.button.callback('⭐ Купить premium за 150 💎','pass_buy')]])); });
+bot.action('pass_buy', async ctx=>{ const u=await requireUser(ctx); if(Number(u.crystals)<150) return ctx.answerCbQuery('Нужно 150 кристаллов'); await pool.query('UPDATE users SET crystals=crystals-150, pass_premium=TRUE WHERE id=$1',[u.id]); await ctx.answerCbQuery('Premium куплен'); });
+async function claimPass(ctx,premium=false){ const u=await requireUser(ctx); const lvl=Math.min(50,Math.floor(u.pass_xp/500)+1); if(premium && !u.pass_premium) return ctx.answerCbQuery('Premium не куплен'); const r=await pool.query('SELECT * FROM pass_rewards WHERE user_id=$1 AND level=$2 AND premium=$3',[u.id,lvl,premium]); if(r.rows[0]) return ctx.answerCbQuery('Уже забрано'); await pool.query('INSERT INTO pass_rewards(user_id,level,premium) VALUES($1,$2,$3)',[u.id,lvl,premium]); const fox=premium?lvl*100000:lvl*30000, cr=premium?lvl:0; await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3',[fox,cr,u.id]); await ctx.answerCbQuery('Забрано'); await ctx.reply(`🎫 Награда Fox Pass: ${m(fox)}${cr?` + ${g(cr)}`:''}`); }
+bot.action('pass_free', ctx=>claimPass(ctx,false)); bot.action('pass_premium', ctx=>claimPass(ctx,true));
+
+bot.hears(/^vip$/i, ctx=>ctx.reply(`⭐ VIP\n\nVIP 1: +10% к бонусам и доходам\nVIP 2: +20%\nVIP 3: +30%\n\nКоманды:\nкупить vip 1\nкупить vip 7\nкупить vip 30`));
+bot.hears(/^купить vip (1|7|30)$/i, async ctx=>{ const u=await requireUser(ctx); const days=Number(ctx.match[1]); const cost={1:20,7:100,30:300}[days]; if(Number(u.crystals)<cost) return ctx.reply(`❌ Нужно ${g(cost)}`); await pool.query(`UPDATE users SET crystals=crystals-$1, vip_level=GREATEST(vip_level,1), vip_until=GREATEST(COALESCE(vip_until,NOW()),NOW()) + ($2 || ' days')::interval WHERE id=$3`,[cost,days,u.id]); await ctx.reply(`⭐ VIP активирован на ${days} дн.`); });
+
+async function casinoResult(ctx,bet,mode='casino'){ const u=await requireUser(ctx); if(!Number.isFinite(bet)||bet<100) return ctx.reply('❌ Минимальная ставка 100.'); if(Number(u.foxes)<bet) return ctx.reply('❌ Не хватает Фоксов.'); const roll=Math.random(); let mult=0, label='💸 Проигрыш'; if(roll<.03){mult=5;label='💎 x5'} else if(roll<.11){mult=3;label='🔥 x3'} else if(roll<.42){mult=2;label='🎰 x2'} const delta=bet*mult-bet; await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[delta,u.id]); await addXp(u.id,35); await markDaily(u.id,'casino_count',true); await logTx(u.id,'casino',delta,mode); await ctx.reply(`${label}\n\nСтавка: ${m(bet)}\n${delta>=0?'Выигрыш':'Потеря'}: ${m(Math.abs(delta))}`); }
+bot.hears(/^казино(?:\s+(.+))?$/i, async ctx=>{ const u=await requireUser(ctx); const raw=ctx.match[1]; if(!raw || raw==='инфо') return ctx.reply('🎰 Казино\n\nказино 1000\nказино все\nказино половина\n\nШансы: x5 — 3%, x3 — 8%, x2 — 31%, проигрыш — 58%'); return casinoResult(ctx,parseAmount(raw,u)); });
+bot.hears(/^монетка\s+(\S+)\s+(орел|орёл|решка)$/i, async ctx=>{ const u=await requireUser(ctx); const bet=parseAmount(ctx.match[1],u), side=ctx.match[2].replace('ё','е'); if(bet<100||Number(u.foxes)<bet) return ctx.reply('❌ Неверная ставка.'); const win=(Math.random()<.49); const res=Math.random()<.5?'орел':'решка'; const delta=win?bet:-bet; await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[delta,u.id]); await markDaily(u.id,'casino_count',true); await addXp(u.id,25); await ctx.reply(`🪙 Выпало: ${res}\n${win?'✅ Победа':'❌ Проигрыш'}: ${m(Math.abs(delta))}`); });
+bot.hears(/^(кубик|дартс|баскет|боулинг)\s+(\S+)(?:\s+(больше|меньше))?$/i, async ctx=>{ const u=await requireUser(ctx); const game=ctx.match[1].toLowerCase(), bet=parseAmount(ctx.match[2],u); if(bet<100||Number(u.foxes)<bet) return ctx.reply('❌ Неверная ставка.'); const n=rnd(1,6); const win = game==='кубик' && ctx.match[3] ? (ctx.match[3]==='больше'?n>=4:n<=3) : n>=4; const delta=win?bet:-bet; await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[delta,u.id]); await markDaily(u.id,'casino_count',true); await addXp(u.id,25); await ctx.reply(`🎲 ${game}: ${n}\n${win?'✅ Победа':'❌ Проигрыш'} ${m(Math.abs(delta))}`); });
+bot.hears(/^мины\s+(\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const bet=parseAmount(ctx.match[1],u); if(bet<100||Number(u.foxes)<bet) return ctx.reply('❌ Неверная ставка.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[bet,u.id]); const bomb=rnd(0,8); const payload={bet,bomb,opened:[]}; await ctx.reply('💣 Мины\nОткрой клетки. Забрать можно после первого сейфа.', minesKb(payload)); });
+function minesKb(s){ const rows=[]; for(let i=0;i<9;i+=3){ rows.push([0,1,2].map(j=>{ const k=i+j; return Markup.button.callback(s.opened.includes(k)?'✅':`${k+1}`,`mine:${Buffer.from(JSON.stringify(s)).toString('base64')}:${k}`)})); } rows.push([Markup.button.callback('💰 Забрать','minecash:'+Buffer.from(JSON.stringify(s)).toString('base64'))]); return Markup.inlineKeyboard(rows); }
+bot.action(/^mine:(.+):(\d+)$/, async ctx=>{ const u=await requireUser(ctx); const s=JSON.parse(Buffer.from(ctx.match[1],'base64').toString()); const k=Number(ctx.match[2]); if(s.opened.includes(k)) return ctx.answerCbQuery('Уже открыто'); if(k===s.bomb){ await markDaily(u.id,'casino_count',true); await ctx.editMessageText(`💥 Бомба! Ты потерял ${m(s.bet)}`); return; } s.opened.push(k); await ctx.editMessageText(`💣 Мины\nОткрыто: ${s.opened.length}\nТекущий выигрыш: ${m(Math.floor(s.bet*(1+s.opened.length*.35)))}`, minesKb(s)); });
+bot.action(/^minecash:(.+)$/, async ctx=>{ const u=await requireUser(ctx); const s=JSON.parse(Buffer.from(ctx.match[1],'base64').toString()); if(!s.opened.length) return ctx.answerCbQuery('Сначала открой клетку'); const win=Math.floor(s.bet*(1+s.opened.length*.35)); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[win,u.id]); await markDaily(u.id,'casino_count',true); await addXp(u.id,50); await ctx.editMessageText(`💰 Забрано: ${m(win)}`); });
+
+bot.hears(/^кейсы$/i, async ctx=>{ const u=await requireUser(ctx); const inv=await pool.query('SELECT * FROM user_cases WHERE user_id=$1',[u.id]); const owned=id=>inv.rows.find(x=>x.case_id===id)?.amount||0; await ctx.reply('📦 Кейсы\n\n'+cases.map(c=>`${c.id}. ${c.title}\nЦена: ${m(c.price)} | У тебя: ${owned(c.id)}`).join('\n\n')+'\n\nкупить кейс 1 3\nоткрыть кейс 1 3'); });
+bot.hears(/^купить кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(100,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const cost=c.price*count; if(Number(u.foxes)<cost) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('INSERT INTO user_cases(user_id,case_id,amount) VALUES($1,$2,$3) ON CONFLICT(user_id,case_id) DO UPDATE SET amount=user_cases.amount+EXCLUDED.amount',[u.id,c.id,count]); await addItem(u.id,c.key,c.title,count); await ctx.reply(`🛒 Куплено: ${c.title} x${count}`); });
+bot.hears(/^открыть кейс (\d+)\s*(\d+)?$/i, async ctx=>{ const u=await requireUser(ctx); const c=cases.find(x=>x.id===Number(ctx.match[1])); const count=Math.min(20,Number(ctx.match[2]||1)); if(!c||count<1) return ctx.reply('❌ Нет такого кейса.'); const take=await pool.query('UPDATE user_cases SET amount=amount-$1 WHERE user_id=$2 AND case_id=$3 AND amount>=$1 RETURNING amount',[count,u.id,c.id]); if(!take.rows[0]) return ctx.reply('❌ У тебя нет столько кейсов.'); await takeItem(u.id,c.key,count); let fox=0, cr=0, text=[]; const luck=u.case_luck_until && new Date(u.case_luck_until)>now() ? .03 : 0; for(let i=0;i<count;i++){ let win=rnd(c.min,c.max); if(Math.random()<c.jackpot+luck) win*=5; fox+=win; if(Math.random()<c.gemChance+luck){ cr+=c.gems; } text.push(`+${cash(win)}`); } await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3',[fox,cr,u.id]); await addXp(u.id,40*count); await markDaily(u.id,'case_done'); await ctx.reply(`🔐 Открыто ${c.title} x${count}\n\n${text.slice(0,10).join('\n')}${text.length>10?'\n...':''}\n\nИтого: ${m(fox)}${cr?` + ${g(cr)}`:''}`); });
+
+async function showFacility(ctx,kind){ const u=await requireUser(ctx); const fdef=facilities[kind]; let r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); if(!r.rows[0]) return ctx.reply(`${fdef.icon} ${fdef.title}\n\nУ тебя пока нет постройки.\nКоманда: ${fdef.build}\nЦена: ${m(fdef.price)}`); const f=r.rows[0]; const mult=(u.income_boost_until&&new Date(u.income_boost_until)>now()?1.25:1)*(1+(u.vip_level||0)*.1)*await clanBonus(u.id); const income=Math.floor(Number(f.income)*Number(f.level)*mult); let txt=`${fdef.icon} ${fdef.title}\n\n🥐 Доход: ${cash(income)} / ${fdef.interval}ч\n📈 Уровень: ${f.level}\n🦅 Налоги: ${cash(f.tax_debt)} / ${cash(f.tax_limit)}\n📦 На счету: ${cash(f.account)}`; if(kind==='farm') txt+=`\n🎬 Видеокарты: ${f.video_cards}/${f.max_video_cards}\n🆙 Цена видеокарты: ${cash(150000+f.video_cards*50000)}`; if(kind==='business') txt+=`\n⬆️ Территория: ${f.territory_m2} м²\n🆙 Бизнес: ${f.business_m2} м²`; if(kind==='garden') txt+=`\n🌳 Деревья: ${f.trees_count}\n💦 Воды: ${f.water}/${f.max_water}`; const kb=kind==='farm'?farmButtons():kind==='garden'?gardenButtons():kind==='business'?businessButtons():Markup.inlineKeyboard([[Markup.button.callback('💰 Собрать прибыль',`fac_collect:${kind}`),Markup.button.callback('🦅 Оплатить налоги',`fac_tax:${kind}`)],[Markup.button.callback('⬆️ Улучшить',`fac_upgrade:${kind}`)]]); await ctx.reply(txt,kb); }
+for(const [kind,d] of Object.entries(facilities)){ bot.hears(new RegExp(`^(${d.aliases.join('|')})$`,'i'), ctx=>showFacility(ctx,kind)); bot.hears(new RegExp(`^${d.build}$`,'i'), async ctx=>{ const u=await requireUser(ctx); const exists=await pool.query('SELECT id FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); if(exists.rows[0]) return ctx.reply('✅ Уже построено.'); if(Number(u.foxes)<d.price) return ctx.reply(`❌ Нужно ${m(d.price)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[d.price,u.id]); await pool.query('INSERT INTO facilities(user_id,kind,title,income,last_collect_at,last_tick_at,video_cards) VALUES($1,$2,$3,$4,NOW(),NOW(),$5)',[u.id,kind,d.title,d.income,kind==='farm'?1:0]); await addXp(u.id,120); await ctx.reply(`🏗 Построено: ${d.title}`); }); bot.hears(new RegExp(`^продать ${kind==='farm'?'ферму':kind==='business'?'бизнес':d.title.toLowerCase()}$`,'i'), ctx=>ctx.reply('💰 Продажа временно недоступна.')); }
+async function collectFacility(ctx,kind){ const u=await requireUser(ctx); const d=facilities[kind]; const r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); const f=r.rows[0]; if(!f) return ctx.reply(`❌ Сначала: ${d.build}`); const last=f.last_collect_at?new Date(f.last_collect_at):new Date(0); if(now()-last<d.interval*3600000) return ctx.reply(`⏳ Прибыль можно собирать раз в ${d.interval}ч.`); const mult=(u.income_boost_until&&new Date(u.income_boost_until)>now()?1.25:1)*(1+(u.vip_level||0)*.1)*await clanBonus(u.id); let inc=Math.floor(Number(f.income)*Number(f.level)*mult); if(kind==='farm') inc*=Math.max(1,Number(f.video_cards)); if(kind==='garden') inc*=Math.max(1,Number(f.trees_count)/10); const tax=Math.floor(inc*.08); if(Number(f.tax_debt)+tax>Number(f.tax_limit)) return ctx.reply('🦅 Сначала оплати налоги, лимит переполнен.'); await pool.query('UPDATE facilities SET last_collect_at=NOW(), account=account+$1, tax_debt=tax_debt+$2 WHERE id=$3',[inc,tax,f.id]); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[inc,u.id]); await markDaily(u.id,'collect_done'); await addXp(u.id,80); await ctx.reply(`💰 Собрано: ${m(inc)}\n🦅 Налог начислен: ${m(tax)}`); }
+bot.action(/^fac_collect:(\w+)$/, ctx=>collectFacility(ctx,ctx.match[1]));
+bot.action(/^fac_tax:(\w+)$/, async ctx=>{ const u=await requireUser(ctx); const f=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,ctx.match[1]]); if(!f.rows[0]) return ctx.answerCbQuery('Нет постройки'); const debt=Number(f.rows[0].tax_debt); if(debt<=0) return ctx.answerCbQuery('Налогов нет'); if(Number(u.foxes)<debt) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[debt,u.id]); await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1',[f.rows[0].id]); await ctx.reply(`🦅 Налоги оплачены: ${m(debt)}`); });
+bot.action(/^fac_upgrade:(\w+)$/, async ctx=>{ const u=await requireUser(ctx); const kind=ctx.match[1]; const r=await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2',[u.id,kind]); const f=r.rows[0]; if(!f) return ctx.answerCbQuery('Нет постройки'); const cost=Number(f.level)*500000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('UPDATE facilities SET level=level+1,income=income*1.25 WHERE id=$1',[f.id]); await ctx.reply(`⬆️ Улучшено до уровня ${Number(f.level)+1}`); });
+bot.action(/^fac_card:farm$/, async ctx=>{ const u=await requireUser(ctx); const r=await pool.query("SELECT * FROM facilities WHERE user_id=$1 AND kind='farm'",[u.id]); const f=r.rows[0]; if(!f) return ctx.reply('❌ Сначала построй ферму.'); if(f.video_cards>=f.max_video_cards) return ctx.reply('✅ Максимум видеокарт.'); const cost=150000+Number(f.video_cards)*50000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('UPDATE facilities SET video_cards=video_cards+1 WHERE id=$1',[f.id]); await ctx.reply('🎬 Видеокарта куплена.'); });
+bot.action(/^fac_tree:garden$/, async ctx=>{ const u=await requireUser(ctx); const f=(await pool.query("SELECT * FROM facilities WHERE user_id=$1 AND kind='garden'",[u.id])).rows[0]; if(!f) return ctx.reply('❌ Сначала построй сад.'); const cost=100000+Number(f.trees_count)*25000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('UPDATE facilities SET trees_count=trees_count+1 WHERE id=$1',[f.id]); await ctx.reply('🌳 Дерево куплено.'); });
+bot.action(/^fac_water:garden$/, async ctx=>{ const u=await requireUser(ctx); await pool.query("UPDATE facilities SET water=max_water WHERE user_id=$1 AND kind='garden'",[u.id]); await markDaily(u.id,'garden_done'); await ctx.reply('💦 Сад полит.'); });
+bot.action(/^fac_territory:business$/, async ctx=>{ const u=await requireUser(ctx); const f=(await pool.query("SELECT * FROM facilities WHERE user_id=$1 AND kind='business'",[u.id])).rows[0]; const cost=250000+Number(f.territory_m2)*1000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); await pool.query('UPDATE facilities SET territory_m2=territory_m2+40 WHERE id=$1',[f.id]); await ctx.reply('⬆️ Территория увеличена.'); });
+
+bot.hears(/^инвентарь$/i, async ctx=>{ const u=await requireUser(ctx); const r=await pool.query('SELECT * FROM inventory_items WHERE user_id=$1 AND amount>0 ORDER BY title',[u.id]); if(!r.rows.length) return ctx.reply('🎒 Инвентарь пуст.'); await ctx.reply('🎒 Инвентарь\n\n'+r.rows.map(x=>`${x.title}: ${x.amount} шт.`).join('\n')+'\n\nиспользовать зелье 1'); });
+bot.hears(/^зелья$/i, ctx=>ctx.reply('🍸 Зелья\n\n'+potions.map(p=>`${p.id}. ${p.title}\nЦена: ${p.cost} 💎 — ${p.text}`).join('\n\n')+'\n\nсоздать зелье 1'));
+bot.hears(/^создать зелье (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const p=potions.find(x=>x.id===Number(ctx.match[1])); if(!p) return ctx.reply('❌ Нет такого зелья.'); if(Number(u.crystals)<p.cost) return ctx.reply(`❌ Нужно ${g(p.cost)}`); await pool.query('UPDATE users SET crystals=crystals-$1 WHERE id=$2',[p.cost,u.id]); await addItem(u.id,p.key,p.title,1); await ctx.reply(`🍸 Создано: ${p.title}`); });
+bot.hears(/^использовать зелье (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const p=potions.find(x=>x.id===Number(ctx.match[1])); if(!p) return ctx.reply('❌ Нет такого зелья.'); const ok=await takeItem(u.id,p.key,1); if(!ok) return ctx.reply('❌ Такого зелья нет в инвентаре.'); if(p.id===1) await pool.query("UPDATE users SET case_luck_until=NOW()+INTERVAL '2 hours' WHERE id=$1",[u.id]); if(p.id===2) await pool.query("UPDATE users SET income_boost_until=NOW()+INTERVAL '2 hours' WHERE id=$1",[u.id]); if(p.id===3) await pool.query('UPDATE users SET luck_charges=luck_charges+3 WHERE id=$1',[u.id]); await ctx.reply(`✅ Использовано: ${p.title}`); });
+
+bot.hears(/^рынок$/i, async ctx=>{ const r=await pool.query("SELECT * FROM market_lots WHERE status='active' ORDER BY created_at DESC LIMIT 10"); await ctx.reply('🛒 Рынок\n\n'+(r.rows.map(x=>`${x.id}. ${x.title} x${x.amount} — ${m(x.price)}`).join('\n')||'Пусто')+'\n\nрынок купить ID\nрынок выставить case_1 1 500000'); });
+bot.hears(/^рынок выставить (\S+)\s+(\d+)\s+(\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const [key,amount,price]=[ctx.match[1],Number(ctx.match[2]),Number(ctx.match[3])]; const item=(await pool.query('SELECT * FROM inventory_items WHERE user_id=$1 AND item_key=$2 AND amount>=$3',[u.id,key,amount])).rows[0]; if(!item) return ctx.reply('❌ Нет такого предмета/количества.'); await takeItem(u.id,key,amount); await pool.query('INSERT INTO market_lots(seller_user_id,item_key,title,amount,price) VALUES($1,$2,$3,$4,$5)',[u.id,key,item.title,amount,price]); await ctx.reply('🛒 Лот выставлен.'); });
+bot.hears(/^рынок купить (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const lot=(await pool.query("SELECT * FROM market_lots WHERE id=$1 AND status='active'",[Number(ctx.match[1])])).rows[0]; if(!lot) return ctx.reply('❌ Лот не найден.'); if(Number(u.foxes)<Number(lot.price)) return ctx.reply('❌ Не хватает Фоксов.'); await pool.query('BEGIN'); try{ await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[lot.price,u.id]); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[lot.price,lot.seller_user_id]); await addItem(u.id,lot.item_key,lot.title,lot.amount); await pool.query("UPDATE market_lots SET status='sold', sold_at=NOW() WHERE id=$1",[lot.id]); await pool.query('COMMIT'); await ctx.reply('✅ Куплено.'); }catch(e){ await pool.query('ROLLBACK'); throw e; } });
+
+bot.hears(/^клан$/i, async ctx=>{ const u=await requireUser(ctx); const r=await pool.query('SELECT c.*,m.role FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[u.id]); if(!r.rows[0]) return ctx.reply('🏰 Ты не в клане.\n\nклан создать Название\nклан вступить ID'); const c=r.rows[0]; await ctx.reply(`🏰 Клан ${c.title}\n\nID: ${c.id}\nУровень: ${c.level}\nКазна: ${m(c.bank)}\nБонус дохода: +${c.level*2}%\nТвоя роль: ${c.role}\n\nклан донат 10000\nклан улучшить\nклан участники`); });
+bot.hears(/^клан создать (.+)$/i, async ctx=>{ const u=await requireUser(ctx); const has=await pool.query('SELECT id FROM clan_members WHERE user_id=$1',[u.id]); if(has.rows[0]) return ctx.reply('❌ Ты уже в клане.'); const cost=1000000; if(Number(u.foxes)<cost) return ctx.reply(`❌ Нужно ${m(cost)}`); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[cost,u.id]); const c=await pool.query('INSERT INTO clans(title,owner_user_id) VALUES($1,$2) RETURNING *',[ctx.match[1].slice(0,32),u.id]); await pool.query("INSERT INTO clan_members(clan_id,user_id,role) VALUES($1,$2,'owner')",[c.rows[0].id,u.id]); await ctx.reply(`🏰 Клан создан: ${c.rows[0].title}\nID: ${c.rows[0].id}`); });
+bot.hears(/^клан вступить (\d+)$/i, async ctx=>{ const u=await requireUser(ctx); const has=await pool.query('SELECT id FROM clan_members WHERE user_id=$1',[u.id]); if(has.rows[0]) return ctx.reply('❌ Ты уже в клане.'); const c=await pool.query('SELECT * FROM clans WHERE id=$1',[Number(ctx.match[1])]); if(!c.rows[0]) return ctx.reply('❌ Клан не найден.'); await pool.query('INSERT INTO clan_members(clan_id,user_id) VALUES($1,$2)',[c.rows[0].id,u.id]); await ctx.reply(`✅ Ты вступил в клан ${c.rows[0].title}`); });
+bot.hears(/^клан донат (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const amount=parseAmount(ctx.match[1],u); if(amount<1||Number(u.foxes)<amount) return ctx.reply('❌ Неверная сумма.'); const cm=await pool.query('SELECT * FROM clan_members WHERE user_id=$1',[u.id]); if(!cm.rows[0]) return ctx.reply('❌ Ты не в клане.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[amount,u.id]); await pool.query('UPDATE clans SET bank=bank+$1,xp=xp+$2 WHERE id=$3',[amount,Math.floor(amount/1000),cm.rows[0].clan_id]); await ctx.reply(`🏦 В казну отправлено: ${m(amount)}`); });
+bot.hears(/^клан улучшить$/i, async ctx=>{ const u=await requireUser(ctx); const c=(await pool.query('SELECT c.* FROM clans c JOIN clan_members m ON m.clan_id=c.id WHERE m.user_id=$1',[u.id])).rows[0]; if(!c) return ctx.reply('❌ Ты не в клане.'); const cost=Number(c.level)*2000000; if(Number(c.bank)<cost) return ctx.reply(`❌ В казне нужно ${m(cost)}`); await pool.query('UPDATE clans SET bank=bank-$1, level=level+1 WHERE id=$2',[cost,c.id]); await ctx.reply(`⬆️ Клан улучшен до ${Number(c.level)+1} уровня.`); });
+bot.hears(/^клан участники$/i, async ctx=>{ const u=await requireUser(ctx); const cm=(await pool.query('SELECT clan_id FROM clan_members WHERE user_id=$1',[u.id])).rows[0]; if(!cm) return ctx.reply('❌ Ты не в клане.'); const r=await pool.query('SELECT u.username,u.first_name,m.role FROM clan_members m JOIN users u ON u.id=m.user_id WHERE m.clan_id=$1 LIMIT 30',[cm.clan_id]); await ctx.reply('👥 Участники\n\n'+r.rows.map(x=>`${x.role} — ${x.username?'@'+x.username:x.first_name}`).join('\n')); });
+bot.hears(/^топ кланы$/i, async ctx=>{ const r=await pool.query('SELECT * FROM clans ORDER BY level DESC, bank DESC LIMIT 10'); await ctx.reply('🏆 Топ кланы\n\n'+(r.rows.map((c,i)=>`${i+1}. ${c.title} — ур.${c.level}, ${m(c.bank)}`).join('\n')||'Пусто')); });
+
+bot.hears(/^свадьба (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const p=await getUserByAny(ctx.match[1]); if(!p||p.id===u.id) return ctx.reply('❌ Пользователь не найден.'); const exists=await pool.query('SELECT id FROM marriages WHERE user1_id IN ($1,$2) OR user2_id IN ($1,$2)',[u.id,p.id]); if(exists.rows[0]) return ctx.reply('❌ У кого-то уже есть брак.'); await pool.query('INSERT INTO marriages(user1_id,user2_id) VALUES($1,$2)',[u.id,p.id]); await ctx.reply(`💒 Свадьба состоялась! ${u.first_name} + ${p.username?'@'+p.username:p.first_name}`); });
+bot.hears(/^развод$/i, async ctx=>{ const u=await requireUser(ctx); await pool.query('DELETE FROM marriages WHERE user1_id=$1 OR user2_id=$1',[u.id]); await ctx.reply('💔 Развод оформлен.'); });
+bot.hears(/^мой брак$/i, async ctx=>{ const u=await requireUser(ctx); const r=await pool.query('SELECT * FROM marriages WHERE user1_id=$1 OR user2_id=$1',[u.id]); if(!r.rows[0]) return ctx.reply('💌 Ты пока не в браке.'); const other=r.rows[0].user1_id===u.id?r.rows[0].user2_id:r.rows[0].user1_id; const p=(await pool.query('SELECT * FROM users WHERE id=$1',[other])).rows[0]; await ctx.reply(`💌 Твой брак: ${p.username?'@'+p.username:p.first_name}\nДата: ${r.rows[0].created_at.toLocaleString?.()||r.rows[0].created_at}`); });
+
+bot.hears(/^шар (.+)$/i, ctx=>{ const a=['Да','Нет','Скорее да','Скорее нет','Лис говорит: рискни','Лучше завтра','100%, но без паники','Сомнительно']; ctx.reply(`🔮 ${ctx.match[1]}\n\n${a[rnd(0,a.length-1)]}`); });
+bot.hears(/^выбери (.+) или (.+)$/i, ctx=>ctx.reply(`💬 Я выбираю: ${Math.random()<.5?ctx.match[1]:ctx.match[2]}`));
+bot.hears(/^инфа (.+)$/i, ctx=>ctx.reply(`📊 Инфа по «${ctx.match[1]}»: ${rnd(0,100)}%`));
+bot.hears(/^испытать удачу$/i, async ctx=>{ const u=await requireUser(ctx); if(u.last_luck_at && now()-new Date(u.last_luck_at)<3600000 && u.luck_charges<=0) return ctx.reply('🍀 Удачу можно испытывать раз в час.'); const win=Math.random()<.45; const reward=win?rnd(10000,150000):0; await pool.query('UPDATE users SET foxes=foxes+$1,last_luck_at=NOW(),luck_charges=GREATEST(luck_charges-1,0) WHERE id=$2',[reward,u.id]); await addXp(u.id,30); await ctx.reply(win?`🍀 Удача с тобой: ${m(reward)}`:'🍀 Сегодня не повезло.'); });
+
+bot.hears(/^передать (\S+)\s+(\S+)$/i, async ctx=>{ const u=await requireUser(ctx); if(u.level<3) return ctx.reply('❌ Передачи доступны с 3 уровня.'); const p=await getUserByAny(ctx.match[1]); const amount=parseAmount(ctx.match[2],u); if(!p||p.id===u.id) return ctx.reply('❌ Получатель не найден.'); if(amount<100||amount>Number(u.foxes)) return ctx.reply('❌ Неверная сумма.'); await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2',[amount,u.id]); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[amount,p.id]); await logTx(u.id,'transfer_out',amount,`to ${p.tg_id}`); await logTx(p.id,'transfer_in',amount,`from ${u.tg_id}`); await ctx.reply(`✅ Передано ${m(amount)} игроку ${p.username?'@'+p.username:p.first_name}`); });
+bot.hears(/^топ$/i, async ctx=>{ const r=await pool.query('SELECT username,first_name,foxes FROM users ORDER BY foxes DESC LIMIT 10'); await ctx.reply('🏆 Топ игроков\n\n'+r.rows.map((u,i)=>`${i+1}. ${u.username?'@'+u.username:u.first_name} — ${m(u.foxes)}`).join('\n')); });
+bot.hears(/^промо (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const code=ctx.match[1].toUpperCase(); const client=await pool.connect(); try{ await client.query('BEGIN'); const pr=(await client.query('SELECT * FROM promo_codes WHERE UPPER(code)=UPPER($1) FOR UPDATE',[code])).rows[0]; if(!pr){ await client.query('ROLLBACK'); return ctx.reply('❌ Промокод не найден.'); } if(pr.activations>=pr.max_activations){ await client.query('ROLLBACK'); return ctx.reply('❌ Активации закончились.'); } if(pr.only_vip && !u.vip_level){ await client.query('ROLLBACK'); return ctx.reply('❌ Только для VIP.'); } if(u.level<pr.min_level){ await client.query('ROLLBACK'); return ctx.reply(`❌ Нужен уровень ${pr.min_level}.`); } if(pr.expires_at && new Date(pr.expires_at)<now()){ await client.query('ROLLBACK'); return ctx.reply('❌ Промокод истек.'); } const used=(await client.query('SELECT id FROM promo_activations WHERE promo_id=$1 AND user_id=$2',[pr.id,u.id])).rows[0]; if(used){ await client.query('ROLLBACK'); return ctx.reply('❌ Уже активировал.'); } await client.query('INSERT INTO promo_activations(promo_id,user_id) VALUES($1,$2)',[pr.id,u.id]); await client.query('UPDATE promo_codes SET activations=activations+1 WHERE id=$1',[pr.id]); await client.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3',[pr.reward_foxes,pr.reward_crystals,u.id]); await client.query('COMMIT'); await ctx.reply(`✅ Промо активирован\n+${m(pr.reward_foxes)}\n+${g(pr.reward_crystals)}`); }catch(e){ await client.query('ROLLBACK'); throw e; } finally{ client.release(); } });
+
+
+// Extra command aliases: bank, direct facility actions, group fun
+bot.hears(/^банк$/i, async ctx=>{ const u=await requireUser(ctx); await ctx.reply(`🏦 Банк\n\nНа руках: ${m(u.foxes)}\nВ банке: ${m(u.bank)}\n\nбанк положить 1000\nбанк положить все\nбанк снять 1000\nбанк снять все`); });
+bot.hears(/^банк положить (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const amount=parseAmount(ctx.match[1],u); if(amount<1||Number(u.foxes)<amount) return ctx.reply('❌ Неверная сумма.'); await pool.query('UPDATE users SET foxes=foxes-$1, bank=bank+$1 WHERE id=$2',[amount,u.id]); await ctx.reply(`🏦 Положено: ${m(amount)}`); });
+bot.hears(/^банк снять (\S+)$/i, async ctx=>{ const u=await requireUser(ctx); const raw=ctx.match[1].toLowerCase(); const amount=['все','all'].includes(raw)?Math.floor(Number(u.bank)):Number(raw); if(amount<1||Number(u.bank)<amount) return ctx.reply('❌ Неверная сумма.'); await pool.query('UPDATE users SET foxes=foxes+$1, bank=bank-$1 WHERE id=$2',[amount,u.id]); await ctx.reply(`🏦 Снято: ${m(amount)}`); });
+
+bot.hears(/^(собрать прибыль|бизнес собрать|ферма собрать|сад собрать|генератор собрать|карьер собрать)$/i, async ctx=>{ const t=ctx.match[1].toLowerCase(); const kind=t.includes('ферм')?'farm':t.includes('сад')?'garden':t.includes('генератор')?'generator':t.includes('карьер')?'quarry':'business'; return collectFacility(ctx,kind); });
+bot.hears(/^(оплатить налоги|бизнес налоги|ферма налоги|сад налоги)$/i, async ctx=>{ await ctx.reply('🦅 Налоги оплачиваются кнопкой внутри карточки постройки: открой «бизнес», «ферма» или «сад».'); });
+bot.hears(/^купить видеокарту$/i, async ctx=>{ await ctx.reply('🎬 Открой «ферма» и нажми кнопку «Купить видеокарту».'); });
+bot.hears(/^сад полить$/i, async ctx=>{ const u=await requireUser(ctx); await pool.query("UPDATE facilities SET water=max_water WHERE user_id=$1 AND kind='garden'",[u.id]); await markDaily(u.id,'garden_done'); await ctx.reply('💦 Сад полит.'); });
+bot.hears(/^купить дерево$/i, async ctx=>{ await ctx.reply('🌳 Открой «сад» и нажми кнопку «Купить дерево».'); });
+bot.hears(/^(увеличить бизнес|увеличить территорию|улучшить ферму)$/i, async ctx=>{ await ctx.reply('⬆️ Открой карточку постройки и нажми кнопку улучшения.'); });
+
+bot.hears(/^(обнять|поцеловать|ударить)\s+(.+)$/i, ctx=>{ const act=ctx.match[1].toLowerCase(); const target=ctx.match[2]; const emoji=act==='обнять'?'🫂':act==='поцеловать'?'😘':'🥊'; ctx.reply(`${emoji} ${ctx.from.first_name} ${act} ${target}`); });
+bot.hears(/^топ чата$/i, async ctx=>{ const r=await pool.query('SELECT username,first_name,foxes FROM users ORDER BY foxes DESC LIMIT 10'); await ctx.reply('🏆 Топ чата/бота\n\n'+r.rows.map((u,i)=>`${i+1}. ${u.username?'@'+u.username:u.first_name} — ${m(u.foxes)}`).join('\n')); });
+
+bot.hears(/^магазин$/i, ctx=>ctx.reply('🏪 Магазин\n\nДоступно:\n• кейсы — команда «кейсы»\n• VIP — команда «vip»\n• постройки — бизнес, ферма, сад, генератор, карьер\n• зелья — команда «зелья»'));
+
+bot.command('admin', async ctx=>{ if(!admin(ctx)) return; await ctx.reply('🛠 Админ-панель', Markup.inlineKeyboard([[Markup.button.callback('📊 Статистика','adm_stats'),Markup.button.callback('📢 Рассылка help','adm_help')],[Markup.button.callback('🧾 Логи','adm_logs')]])); });
+bot.action('adm_stats', async ctx=>{ if(!admin(ctx)) return; const u=(await pool.query('SELECT COUNT(*) c FROM users')).rows[0].c; const tx=(await pool.query('SELECT COUNT(*) c FROM transactions')).rows[0].c; await ctx.reply(`📊 Статистика\nИгроков: ${u}\nТранзакций: ${tx}`); });
+bot.action('adm_logs', async ctx=>{ if(!admin(ctx)) return; const r=await pool.query('SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10'); await ctx.reply('🧾 Логи\n\n'+r.rows.map(x=>`${x.kind}: ${m(x.amount)} — ${x.meta||''}`).join('\n')); });
+bot.action('adm_help', ctx=>admin(ctx)&&ctx.reply('/adm_give @user 1000\n/adm_crystals @user 10\n/adm_promo CODE FOXES CRYSTALS LIMIT\n/adm_broadcast текст\n/adm_ban @user\n/adm_unban @user'));
+bot.command('adm_give', async ctx=>{ if(!admin(ctx)) return; const [,who,amount]=ctx.message.text.split(/\s+/); const u=await getUserByAny(who); if(!u) return ctx.reply('Не найден'); await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2',[Number(amount||0),u.id]); await ctx.reply('OK'); });
+bot.command('adm_crystals', async ctx=>{ if(!admin(ctx)) return; const [,who,amount]=ctx.message.text.split(/\s+/); const u=await getUserByAny(who); if(!u) return ctx.reply('Не найден'); await pool.query('UPDATE users SET crystals=crystals+$1 WHERE id=$2',[Number(amount||0),u.id]); await ctx.reply('OK'); });
+bot.command('adm_promo', async ctx=>{ if(!admin(ctx)) return; const [,code,fox='0',cr='0',limit='100']=ctx.message.text.split(/\s+/); if(!code) return ctx.reply('/adm_promo CODE FOXES CR LIMIT'); await pool.query('INSERT INTO promo_codes(code,reward_foxes,reward_crystals,max_activations) VALUES($1,$2,$3,$4) ON CONFLICT(code) DO UPDATE SET reward_foxes=$2,reward_crystals=$3,max_activations=$4',[code.toUpperCase(),fox,cr,limit]); await ctx.reply('Промо создан.'); });
+bot.command('adm_broadcast', async ctx=>{ if(!admin(ctx)) return; const text=ctx.message.text.replace('/adm_broadcast','').trim(); if(!text) return ctx.reply('Текст?'); const r=await pool.query('SELECT tg_id FROM users WHERE is_banned=FALSE'); let ok=0; for(const row of r.rows){ try{ await ctx.telegram.sendMessage(row.tg_id,`📢 ${text}`); ok++; }catch{} } await ctx.reply(`Разослано: ${ok}`); });
+bot.command(['adm_ban','adm_unban'], async ctx=>{ if(!admin(ctx)) return; const [,who]=ctx.message.text.split(/\s+/); const u=await getUserByAny(who); if(!u) return ctx.reply('Не найден'); await pool.query('UPDATE users SET is_banned=$1 WHERE id=$2',[ctx.message.text.startsWith('/adm_ban'),u.id]); await ctx.reply('OK'); });
+
+bot.catch((err,ctx)=>{ console.error(err); ctx.reply?.('⚠️ Ошибка. Попробуй ещё раз или напиши админу.').catch(()=>{}); });
 await initDb();
-bot.launch();
-console.log(`${BOT_NAME} started`);
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+try{
+  await bot.telegram.setMyCommands([
+    {command:'start',description:'Запустить бота'},
+    {command:'help',description:'Команды и меню'},
+    {command:'profile',description:'Мой профиль'},
+    {command:'balance',description:'Баланс'},
+    {command:'casino',description:'Казино: /casino 1000'},
+    {command:'top',description:'Топ игроков'}
+  ], { scope:{ type:'default' } });
+  await bot.telegram.setMyCommands([
+    {command:'help',description:'Команды группы'},
+    {command:'profile',description:'Профиль'},
+    {command:'balance',description:'Баланс'},
+    {command:'casino',description:'Казино'},
+    {command:'top',description:'Топ игроков'},
+    {command:'chat_top',description:'Топ чата'}
+  ], { scope:{ type:'all_group_chats' } });
+}catch(e){ console.warn('setMyCommands failed:', e.message); }
+bot.launch({ dropPendingUpdates: true });
+console.log(`${BOT_NAME} mega pack started`);
+process.once('SIGINT',()=>bot.stop('SIGINT'));
+process.once('SIGTERM',()=>bot.stop('SIGTERM'));
