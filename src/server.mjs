@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import { pool, requireUser, initDb, logTx } from './db.mjs';
 
 dotenv.config();
@@ -42,7 +42,7 @@ const caseTypes = [
 const facilityTypes = {
   business: { title: 'Бизнес', aliases: ['бизнес', 'мой бизнес'], build: 'построить бизнес', price: 350000, income: 65000, intervalHours: 6, icon: '🗄' },
   generator: { title: 'Генератор', aliases: ['генератор', 'мой генератор'], build: 'построить генератор', price: 750000, income: 145000, intervalHours: 6, icon: '🏭' },
-  farm: { title: 'Майнинг ферма', aliases: ['ферма', 'моя ферма'], build: 'построить ферму', price: 1400000, income: 310000, intervalHours: 8, icon: '🧰' },
+  farm: { title: 'Майнинг ферма', aliases: ['ферма', 'моя ферма', 'майнинг ферма', 'моя майнинг ферма'], build: 'построить ферму', price: 1400000, income: 3000, intervalHours: 1, icon: '🧰' },
   quarry: { title: 'Карьер', aliases: ['карьер', 'мой карьер'], build: 'построить карьер', price: 2800000, income: 720000, intervalHours: 10, icon: '⚠️' },
   tree: { title: 'Денежное дерево', aliases: ['денежное дерево', 'моё дерево', 'мое дерево'], build: 'построить участок', price: 500000, income: 90000, intervalHours: 4, icon: '🏡' },
   garden: { title: 'Сад', aliases: ['сад', 'мой сад'], build: 'построить сад', price: 900000, income: 120000, intervalHours: 6, icon: '🌳' }
@@ -62,6 +62,7 @@ const potionTypes = [
 
 
 function money(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${CURRENCY}`; }
+function gameCash(v) { return `${Number(v || 0).toLocaleString('ru-RU').replace(/\u00a0/g, '.').replace(/ /g, '.')}\$`; }
 function gems(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${GEM}`; }
 function isAdmin(ctx) { return adminIds.has(ctx.from.id); }
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
@@ -125,6 +126,296 @@ async function collectFacilityIncome(user, kind) {
   return { cfg, facility, collected: income, waitMs: 0 };
 }
 
+
+// ===== BFG-style mining farm helpers =====
+const FARM = {
+  baseIncome: 3000,
+  videoCardIncome: 17500,
+  videoCardPrice: 250000,
+  taxRate: 0.05,
+  taxLimit: 5000000,
+  levelUpgradeBase: 500000000
+};
+
+function farmMaxCards(level) {
+  return Math.max(10, Number(level || 1) * 10);
+}
+function farmUpgradeCost(level) {
+  return FARM.levelUpgradeBase * Math.max(1, Number(level || 1));
+}
+function farmIncomePerHour(facility) {
+  const level = Number(facility?.level || 1);
+  const cards = Number(facility?.video_cards || 0);
+  return Math.floor(FARM.baseIncome * level + cards * FARM.videoCardIncome);
+}
+function farmTaxLimit(facility) {
+  return FARM.taxLimit * Math.max(1, Number(facility?.level || 1));
+}
+function farmKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Собрать прибыль', 'farm_collect'), Markup.button.callback('🦅 Оплатить налоги', 'farm_tax')],
+    [Markup.button.callback('⬆️ Улучшить ферму', 'farm_upgrade')],
+    [Markup.button.callback('🔼 Купить видеокарту', 'farm_card')]
+  ]);
+}
+async function syncFarm(facility) {
+  if (!facility) return null;
+  const now = Date.now();
+  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
+  const hours = Math.max(0, (now - last) / 3600000);
+  if (hours < 0.01) return facility;
+
+  const taxLimit = farmTaxLimit(facility);
+  const taxDebt = Number(facility.tax_debt || 0);
+  if (taxDebt >= taxLimit) {
+    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
+    return r.rows[0];
+  }
+
+  const generated = Math.floor(farmIncomePerHour(facility) * hours);
+  if (generated <= 0) {
+    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
+    return r.rows[0];
+  }
+
+  const taxAdd = Math.floor(generated * FARM.taxRate);
+  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
+  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
+
+  const r = await pool.query(
+    'UPDATE facilities SET account=account+$1, tax_debt=$2, last_tick_at=NOW() WHERE id=$3 RETURNING *',
+    [allowedIncome, newTax, facility.id]
+  );
+  return r.rows[0];
+}
+async function getFarm(user) {
+  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'farm']);
+  if (!r.rows[0]) return null;
+  return syncFarm(r.rows[0]);
+}
+function farmText(user, farm) {
+  if (!farm) {
+    return `🧰 У тебя пока нет «Майнинг ферма».\n\n🏗 Построить ферму — ${money(facilityTypes.farm.price)}\nПосле постройки появятся видеокарты, налоги, счёт и прибыль.`;
+  }
+  const income = farmIncomePerHour(farm);
+  const cards = Number(farm.video_cards || 0);
+  const maxCards = farmMaxCards(farm.level);
+  const tax = Number(farm.tax_debt || 0);
+  const taxLimit = farmTaxLimit(farm);
+  const account = Number(farm.account || 0);
+  const next = farmUpgradeCost(farm.level);
+  const username = user.first_name || user.username || 'игрок';
+  return `кассик, информация о вашей "Майнинг ферма":\n` +
+    `🏭 Доход: ${income.toLocaleString('ru-RU')}/час.\n` +
+    `📝 Видеокарты: ${cards} шт./${maxCards} шт.\n` +
+    `🆙 Для следующего уровня: ${next.toLocaleString('ru-RU')}$\n\n` +
+    `🦅 Налоги: ${tax.toLocaleString('ru-RU')}$/${taxLimit.toLocaleString('ru-RU')}$\n` +
+    `💰 На счету: ${account.toLocaleString('ru-RU')}$`;
+}
+async function showFarm(ctx, user, edit = false) {
+  const farm = await getFarm(user);
+  const text = farmText(user, farm);
+  const extra = farm ? farmKeyboard() : undefined;
+  if (edit && ctx.updateType === 'callback_query') {
+    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
+  }
+  return ctx.reply(text, extra);
+}
+
+
+// ===== BFG-style business helpers =====
+const BUSINESS = {
+  baseTerritory: 120,
+  baseBusiness: 120,
+  taxRate: 0.05,
+  taxLimit: 5000000,
+  territoryUpgradeBase: 200000000000,
+  businessUpgradeBase: 280000000000,
+  buildIncomeMultiplier: 292
+};
+
+function businessIncomePerHour(facility) {
+  const territory = Number(facility?.territory_m2 || BUSINESS.baseTerritory);
+  const businessArea = Number(facility?.business_m2 || BUSINESS.baseBusiness);
+  const level = Number(facility?.level || 1);
+  return Math.floor(Math.pow(territory, 3) * Math.pow(businessArea, 2) * BUSINESS.buildIncomeMultiplier * level);
+}
+function businessTaxLimit(facility) {
+  return BUSINESS.taxLimit * Math.max(1, Number(facility?.level || 1));
+}
+function businessTerritoryUpgradeCost(facility) {
+  const territory = Number(facility?.territory_m2 || BUSINESS.baseTerritory);
+  return Math.floor(BUSINESS.territoryUpgradeBase * Math.pow(1.18, territory - BUSINESS.baseTerritory));
+}
+function businessUpgradeCost(facility) {
+  const businessArea = Number(facility?.business_m2 || BUSINESS.baseBusiness);
+  return Math.floor(BUSINESS.businessUpgradeBase * Math.pow(1.17, businessArea - BUSINESS.baseBusiness));
+}
+function businessKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Собрать прибыль', 'business_collect'), Markup.button.callback('🦅 Оплатить налоги', 'business_tax')],
+    [Markup.button.callback('⬆️ Увеличить территорию', 'business_territory'), Markup.button.callback('🆙 Увеличить бизнес', 'business_upgrade')]
+  ]);
+}
+async function syncBusiness(facility) {
+  if (!facility) return null;
+  const now = Date.now();
+  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
+  const hours = Math.max(0, (now - last) / 3600000);
+  if (hours < 0.01) return facility;
+  const taxLimit = businessTaxLimit(facility);
+  const taxDebt = Number(facility.tax_debt || 0);
+  if (taxDebt >= taxLimit) {
+    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
+    return r.rows[0];
+  }
+  const generated = Math.floor(businessIncomePerHour(facility) * hours);
+  if (generated <= 0) {
+    const r = await pool.query('UPDATE facilities SET last_tick_at=NOW() WHERE id=$1 RETURNING *', [facility.id]);
+    return r.rows[0];
+  }
+  const taxAdd = Math.floor(generated * BUSINESS.taxRate);
+  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
+  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
+  const r = await pool.query(
+    'UPDATE facilities SET account=account+$1, tax_debt=$2, last_tick_at=NOW() WHERE id=$3 RETURNING *',
+    [allowedIncome, newTax, facility.id]
+  );
+  return r.rows[0];
+}
+async function getBusinessFacility(user) {
+  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'business']);
+  if (!r.rows[0]) return null;
+  return syncBusiness(r.rows[0]);
+}
+function businessText(user, business) {
+  if (!business) {
+    return `кассик, у вас пока нет бизнеса.\n\n🏗 Построить бизнес — ${gameCash(facilityTypes.business.price)}\nПосле постройки появятся территория, налоги, счёт и прибыль.`;
+  }
+  const territory = Number(business.territory_m2 || BUSINESS.baseTerritory);
+  const area = Number(business.business_m2 || BUSINESS.baseBusiness);
+  const income = businessIncomePerHour(business);
+  const tax = Number(business.tax_debt || 0);
+  const taxLimit = businessTaxLimit(business);
+  const account = Number(business.account || 0);
+  const territoryNext = businessTerritoryUpgradeCost(business);
+  const businessNext = businessUpgradeCost(business);
+  return `кассик информация о вашем Бизнесе "Бизнес":\n` +
+    `🧱 Территория: ${territory} м²\n` +
+    `🆙 Для следующего уровня: ${gameCash(territoryNext)}\n` +
+    `🏢 Территория бизнеса: ${area} м²\n` +
+    `🆙 Для следующего уровня: ${gameCash(businessNext)}\n\n` +
+    `💵 Доход: ${gameCash(income)}\n` +
+    `🦅 Налоги: ${gameCash(tax)}/${gameCash(taxLimit)}\n` +
+    `💰 Прибыль: ${gameCash(account)}`;
+}
+async function showBusiness(ctx, user, edit = false) {
+  const business = await getBusinessFacility(user);
+  const text = businessText(user, business);
+  const extra = business ? businessKeyboard() : undefined;
+  if (edit && ctx.updateType === 'callback_query') {
+    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
+  }
+  return ctx.reply(text, extra);
+}
+
+
+
+// ===== BFG-style garden helpers =====
+const GARDEN = {
+  baseTrees: 10,
+  maxWater: 100,
+  treeIncome: 3300000,
+  treePriceBase: 6068336601,
+  taxRate: 0.05,
+  taxLimit: 5000000,
+  waterPerHour: 4,
+  waterUsePerHour: 2
+};
+
+function gardenTrees(facility) {
+  return Math.max(GARDEN.baseTrees, Number(facility?.trees_count || GARDEN.baseTrees));
+}
+function gardenIncomePerHour(facility) {
+  return Math.floor(gardenTrees(facility) * GARDEN.treeIncome * Math.max(1, Number(facility?.level || 1)));
+}
+function gardenTreeCost(facility) {
+  const trees = gardenTrees(facility);
+  return Math.floor(GARDEN.treePriceBase * Math.pow(1.22, trees - GARDEN.baseTrees));
+}
+function gardenTaxLimit(facility) {
+  return GARDEN.taxLimit * Math.max(1, Number(facility?.level || 1));
+}
+function gardenKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Собрать прибыль', 'garden_collect'), Markup.button.callback('🦅 Оплатить налоги', 'garden_tax')],
+    [Markup.button.callback('⬆️ Купить дерево', 'garden_tree'), Markup.button.callback('💦 Полить сад', 'garden_water')]
+  ]);
+}
+async function syncGarden(facility) {
+  if (!facility) return null;
+  const now = Date.now();
+  const last = facility.last_tick_at ? new Date(facility.last_tick_at).getTime() : new Date(facility.created_at).getTime();
+  const hours = Math.max(0, (now - last) / 3600000);
+  if (hours < 0.01) return facility;
+
+  const currentWater = Number(facility.water || GARDEN.maxWater);
+  const waterLoss = Math.floor(hours * GARDEN.waterUsePerHour);
+  const newWater = Math.max(0, currentWater - waterLoss);
+  const taxLimit = gardenTaxLimit(facility);
+  const taxDebt = Number(facility.tax_debt || 0);
+
+  let generated = 0;
+  if (newWater > 0 && taxDebt < taxLimit) {
+    generated = Math.floor(gardenIncomePerHour(facility) * hours);
+  }
+  const taxAdd = Math.floor(generated * GARDEN.taxRate);
+  const newTax = Math.min(taxLimit, taxDebt + taxAdd);
+  const allowedIncome = newTax >= taxLimit ? Math.floor(generated * 0.5) : generated;
+
+  const r = await pool.query(
+    'UPDATE facilities SET account=account+$1, tax_debt=$2, water=$3, last_tick_at=NOW() WHERE id=$4 RETURNING *',
+    [allowedIncome, newTax, newWater, facility.id]
+  );
+  return r.rows[0];
+}
+async function getGarden(user) {
+  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, 'garden']);
+  if (!r.rows[0]) return null;
+  return syncGarden(r.rows[0]);
+}
+function gardenText(user, garden) {
+  if (!garden) {
+    return `кассик, у вас пока нет сада.\n\n🏗 Построить сад — ${gameCash(facilityTypes.garden.price)}\nПосле постройки появятся деревья, вода, налоги, счёт и прибыль.`;
+  }
+  const income = gardenIncomePerHour(garden);
+  const trees = gardenTrees(garden);
+  const next = gardenTreeCost(garden);
+  const water = Number(garden.water ?? GARDEN.maxWater);
+  const maxWater = Number(garden.max_water || GARDEN.maxWater);
+  const tax = Number(garden.tax_debt || 0);
+  const taxLimit = gardenTaxLimit(garden);
+  const account = Number(garden.account || 0);
+  const dry = water <= 0;
+  return `кассик, информация о вашем "Сад":\n` +
+    `🥐 Доход: ${gameCash(income)}\n` +
+    `🌳 Деревья: ${trees} шт./10 шт.\n` +
+    `🆙 Для следующего уровня: ${gameCash(next)}\n\n` +
+    `💦 Воды: ${water}/${maxWater}\n` +
+    `🦅 Налоги: ${gameCash(tax)}/${gameCash(taxLimit)}\n` +
+    `📦 На-счету: ${gameCash(account)}\n\n` +
+    `${dry ? '⚠️ Сад засох. Полейте его, иначе прибыль не копится.' : '⭐ Не забывайте поливать дерево иначе оно засохнет.'}`;
+}
+async function showGarden(ctx, user, edit = false) {
+  const garden = await getGarden(user);
+  const text = gardenText(user, garden);
+  const extra = garden ? gardenKeyboard() : undefined;
+  if (edit && ctx.updateType === 'callback_query') {
+    return ctx.editMessageText(text, extra).catch(() => ctx.reply(text, extra));
+  }
+  return ctx.reply(text, extra);
+}
+
 const helpText = `🦊 ${BOT_NAME}
 
 Валюта: ${CURRENCY}
@@ -171,7 +462,8 @@ const helpText = `🦊 ${BOT_NAME}
 карьер / мой карьер / построить карьер
 денежное дерево / моё дерево / построить участок
 сад / мой сад / построить сад
-сад полить
+сад собрать / сад налоги
+купить дерево / сад полить
 зелья
 создать зелье номер
 
@@ -338,7 +630,18 @@ bot.hears(/^(построить\s+бизнес|построить\s+генера
   if (exists.rows.length) return ctx.reply(`${cfg.icon} У тебя уже построен ${cfg.title}. Пиши: ${cfg.aliases[0]}`);
   if (Number(user.foxes) < cfg.price) return ctx.reply(`❌ Не хватает ${CURRENCY}. Постройка стоит ${money(cfg.price)}.`);
   await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cfg.price, user.id]);
-  await pool.query('INSERT INTO facilities (user_id, kind, title, income, last_collect_at) VALUES ($1,$2,$3,$4,NOW())', [user.id, kind, cfg.title, cfg.income]);
+  await pool.query(
+    'INSERT INTO facilities (user_id, kind, title, income, last_collect_at, last_tick_at, territory_m2, business_m2, trees_count, water, max_water, tax_limit) VALUES ($1,$2,$3,$4,NOW(),NOW(),$5,$6,$7,$8,$9,$10)',
+    [
+      user.id, kind, cfg.title, cfg.income,
+      kind === 'business' ? BUSINESS.baseTerritory : 120,
+      kind === 'business' ? BUSINESS.baseBusiness : 120,
+      kind === 'garden' ? GARDEN.baseTrees : 0,
+      kind === 'garden' ? GARDEN.maxWater : 0,
+      kind === 'garden' ? GARDEN.maxWater : 0,
+      kind === 'garden' ? GARDEN.taxLimit : (kind === 'farm' ? FARM.taxLimit : 5000000)
+    ]
+  );
   await logTx(user.id, `build_${kind}`, -cfg.price, cfg.title);
   await ctx.reply(`${cfg.icon} Построено: ${cfg.title}\n\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
 });
@@ -349,6 +652,9 @@ bot.hears(/^(мой\s+бизнес|бизнес|мой\s+генератор|ге
   const entry = Object.entries(facilityTypes).find(([, cfg]) => cfg.aliases.map(normalizeRu).includes(text));
   if (!entry) return;
   const [kind, cfg] = entry;
+  if (kind === 'business') return showBusiness(ctx, user);
+  if (kind === 'farm') return showFarm(ctx, user);
+  if (kind === 'garden') return showGarden(ctx, user);
   const res = await collectFacilityIncome(user, kind);
   if (!res.facility) return ctx.reply(`${cfg.icon} ${cfg.title} еще не построен.\n\nКоманда: ${cfg.build}\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
   await ctx.reply(`${cfg.icon} ${cfg.title}\n\nУровень: ${res.facility.level}\nДоход: ${money(res.facility.income)} раз в ${cfg.intervalHours}ч\n${res.collected ? `\n💰 Собрано: +${money(res.collected)}` : `\n⏳ Следующий сбор через: ${formatDuration(res.waitMs)}`}`);
@@ -359,16 +665,327 @@ bot.hears(/^продать\s+(бизнес|генератор|ферму|фер�
   await ctx.reply('💰 Продажа временно недоступна. Позже можно будет включить выкуп за часть цены.');
 });
 
-// ===== Garden and potions =====
-bot.hears(/^сад\s+полить$/i, async (ctx) => {
+
+
+
+bot.hears(/^(бизнес собрать|собрать бизнес)$/i, async (ctx) => {
   const user = await requireUser(ctx);
-  const { facility } = await ensureFacility(user, 'garden');
-  if (!facility) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const amount = Math.floor(Number(business.account || 0));
+  if (amount <= 0) return ctx.reply('💰 Прибыли пока нет. Подожди, пока бизнес накопит деньги.');
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [business.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'business_collect_account', amount, 'business');
+  await ctx.reply(`💰 Собрано с бизнеса: +${money(amount)}`);
+});
+
+bot.hears(/^(бизнес налоги|оплатить налоги бизнеса)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const debt = Math.floor(Number(business.tax_debt || 0));
+  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет.');
+  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [business.id]);
+  await logTx(user.id, 'business_pay_tax', -debt, 'business');
+  await ctx.reply(`🦅 Налоги бизнеса оплачены: ${money(debt)}.`);
+});
+
+bot.hears(/^(увеличить территорию|бизнес территория)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const cost = businessTerritoryUpgradeCost(business);
+  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(cost)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  const r = await pool.query('UPDATE facilities SET territory_m2=territory_m2+1 WHERE id=$1 RETURNING *', [business.id]);
+  await logTx(user.id, 'business_territory_upgrade', -cost, 'business territory');
+  await ctx.reply(`⬆️ Территория увеличена до ${r.rows[0].territory_m2} м²!\n💵 Доход: ${gameCash(businessIncomePerHour(r.rows[0]))}`);
+});
+
+bot.hears(/^(увеличить бизнес|бизнес улучшить)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const cost = businessUpgradeCost(business);
+  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(cost)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  const r = await pool.query('UPDATE facilities SET business_m2=business_m2+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [BUSINESS.taxLimit, business.id]);
+  await logTx(user.id, 'business_upgrade', -cost, 'business area');
+  await ctx.reply(`🆙 Бизнес увеличен до ${r.rows[0].business_m2} м²!\n💵 Доход: ${gameCash(businessIncomePerHour(r.rows[0]))}`);
+});
+
+bot.action('business_collect', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const amount = Math.floor(Number(business.account || 0));
+  if (amount <= 0) return ctx.answerCbQuery('Прибыли пока нет', { show_alert: true });
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [business.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'business_collect_account', amount, 'business');
+  await ctx.reply(`💰 Собрано с бизнеса: +${money(amount)}`);
+  return showBusiness(ctx, user);
+});
+
+bot.action('business_tax', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const debt = Math.floor(Number(business.tax_debt || 0));
+  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
+  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Нужно ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [business.id]);
+  await logTx(user.id, 'business_pay_tax', -debt, 'business');
+  await ctx.reply(`🦅 Налоги бизнеса оплачены: ${money(debt)}.`);
+  return showBusiness(ctx, user);
+});
+
+bot.action('business_territory', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const cost = businessTerritoryUpgradeCost(business);
+  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  await pool.query('UPDATE facilities SET territory_m2=territory_m2+1 WHERE id=$1', [business.id]);
+  await logTx(user.id, 'business_territory_upgrade', -cost, 'business territory');
+  return showBusiness(ctx, user, true);
+});
+
+bot.action('business_upgrade', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let business = await getBusinessFacility(user);
+  if (!business) return ctx.reply('🗄 Сначала построй бизнес: построить бизнес');
+  const cost = businessUpgradeCost(business);
+  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  await pool.query('UPDATE facilities SET business_m2=business_m2+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2', [BUSINESS.taxLimit, business.id]);
+  await logTx(user.id, 'business_upgrade', -cost, 'business area');
+  return showBusiness(ctx, user, true);
+});
+
+bot.hears(/^(собрать прибыль|ферма собрать)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const amount = Math.floor(Number(farm.account || 0));
+  if (amount <= 0) return ctx.reply('💰 На счету фермы пока пусто. Подожди, пока накопится прибыль.');
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [farm.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'farm_collect_account', amount, 'mining farm');
+  await ctx.reply(`💰 Собрано с майнинг фермы: +${money(amount)}`);
+});
+
+bot.hears(/^(оплатить налоги|ферма налоги)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const debt = Math.floor(Number(farm.tax_debt || 0));
+  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет. Красота.');
+  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [farm.id]);
+  await logTx(user.id, 'farm_pay_tax', -debt, 'mining farm');
+  await ctx.reply(`🦅 Налоги оплачены: ${money(debt)}.`);
+});
+
+bot.hears(/^(купить видеокарту|ферма видеокарта)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const cards = Number(farm.video_cards || 0);
+  const max = farmMaxCards(farm.level);
+  if (cards >= max) return ctx.reply(`📝 Слоты закончились: ${cards}/${max}. Сначала улучши ферму.`);
+  const price = Math.floor(FARM.videoCardPrice * (1 + cards * 0.08));
+  if (Number(user.foxes) < price) return ctx.reply(`❌ Не хватает ${CURRENCY}. Видеокарта стоит ${money(price)}.`);
+  const r = await pool.query('UPDATE facilities SET video_cards=video_cards+1 WHERE id=$1 RETURNING *', [farm.id]);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
+  await logTx(user.id, 'farm_buy_card', -price, 'video card');
+  await ctx.reply(`🔼 Видеокарта куплена!\n\n📝 Теперь: ${r.rows[0].video_cards}/${farmMaxCards(r.rows[0].level)}\n🏭 Доход: ${farmIncomePerHour(r.rows[0]).toLocaleString('ru-RU')}/час`);
+});
+
+bot.hears(/^(улучшить ферму|ферма улучшить)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const cost = farmUpgradeCost(farm.level);
+  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Улучшение стоит ${money(cost)}.`);
+  const r = await pool.query('UPDATE facilities SET level=level+1, max_video_cards=max_video_cards+10, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [FARM.taxLimit, farm.id]);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  await logTx(user.id, 'farm_upgrade', -cost, 'mining farm');
+  await ctx.reply(`⬆️ Ферма улучшена до ${r.rows[0].level} уровня!\n\n📝 Слоты: ${farmMaxCards(r.rows[0].level)}\n🏭 Доход: ${farmIncomePerHour(r.rows[0]).toLocaleString('ru-RU')}/час`);
+});
+
+bot.action('farm_collect', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const amount = Math.floor(Number(farm.account || 0));
+  if (amount <= 0) return ctx.answerCbQuery('На счету пока пусто', { show_alert: true });
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [farm.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'farm_collect_account', amount, 'mining farm');
+  await ctx.reply(`💰 Собрано с майнинг фермы: +${money(amount)}`);
+  return showFarm(ctx, user);
+});
+
+bot.action('farm_tax', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const debt = Math.floor(Number(farm.tax_debt || 0));
+  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
+  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Не хватает. Нужно: ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [farm.id]);
+  await logTx(user.id, 'farm_pay_tax', -debt, 'mining farm');
+  await ctx.reply(`🦅 Налоги оплачены: ${money(debt)}.`);
+  return showFarm(ctx, user);
+});
+
+bot.action('farm_card', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const cards = Number(farm.video_cards || 0);
+  const max = farmMaxCards(farm.level);
+  if (cards >= max) return ctx.answerCbQuery('Слоты закончились. Улучши ферму.', { show_alert: true });
+  const price = Math.floor(FARM.videoCardPrice * (1 + cards * 0.08));
+  if (Number(user.foxes) < price) return ctx.answerCbQuery(`Нужно ${price.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
+  await pool.query('UPDATE facilities SET video_cards=video_cards+1 WHERE id=$1', [farm.id]);
+  await logTx(user.id, 'farm_buy_card', -price, 'video card');
+  return showFarm(ctx, user, true);
+});
+
+bot.action('farm_upgrade', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  let farm = await getFarm(user);
+  if (!farm) return ctx.reply('🧰 Сначала построй ферму: построить ферму');
+  const cost = farmUpgradeCost(farm.level);
+  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  await pool.query('UPDATE facilities SET level=level+1, max_video_cards=max_video_cards+10, tax_limit=tax_limit+$1 WHERE id=$2', [FARM.taxLimit, farm.id]);
+  await logTx(user.id, 'farm_upgrade', -cost, 'mining farm');
+  return showFarm(ctx, user, true);
+});
+
+// ===== Garden and potions =====
+bot.hears(/^(сад\s+полить|полить\s+сад)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
   const last = user.garden_watered_at ? new Date(user.garden_watered_at).getTime() : 0;
-  if (last && Date.now() - last < 3 * 60 * 60 * 1000) return ctx.reply(`💦 Сад уже полит. Следующий полив через ${formatDuration(3 * 60 * 60 * 1000 - (Date.now() - last))}.`);
-  const reward = randInt(1, 3);
+  if (last && Date.now() - last < 60 * 60 * 1000) return ctx.reply(`💦 Сад уже полит. Следующий полив через ${formatDuration(60 * 60 * 1000 - (Date.now() - last))}.`);
+  const water = Math.min(GARDEN.maxWater, Number(garden.water || 0) + 35);
+  const reward = Math.random() < 0.35 ? randInt(1, 2) : 0;
+  await pool.query('UPDATE facilities SET water=$1 WHERE id=$2', [water, garden.id]);
   await pool.query('UPDATE users SET garden_watered_at=NOW(), crystals=crystals+$1 WHERE id=$2', [reward, user.id]);
-  await ctx.reply(`💦 Сад полит. Цветочки довольны.\n\n+${gems(reward)} для зелий.`);
+  await ctx.reply(`💦 Сад полит.\n\nВоды: ${water}/${GARDEN.maxWater}${reward ? `\n+${gems(reward)} для зелий.` : ''}`);
+});
+
+bot.hears(/^(сад\s+собрать|собрать\s+сад)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const amount = Math.floor(Number(garden.account || 0));
+  if (amount <= 0) return ctx.reply('💰 На счету сада пока пусто. Поливай сад и подожди, пока накопится прибыль.');
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [garden.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'garden_collect_account', amount, 'garden');
+  await ctx.reply(`💰 Собрано с сада: +${money(amount)}`);
+});
+
+bot.hears(/^(сад\s+налоги|оплатить\s+налоги\s+сада)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const debt = Math.floor(Number(garden.tax_debt || 0));
+  if (debt <= 0) return ctx.reply('🦅 Налогов пока нет. Красота.');
+  if (Number(user.foxes) < debt) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно оплатить: ${money(debt)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [garden.id]);
+  await logTx(user.id, 'garden_pay_tax', -debt, 'garden');
+  await ctx.reply(`🦅 Налоги сада оплачены: ${money(debt)}.`);
+});
+
+bot.hears(/^(купить\s+дерево|сад\s+дерево)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const cost = gardenTreeCost(garden);
+  if (Number(user.foxes) < cost) return ctx.reply(`❌ Не хватает ${CURRENCY}. Дерево стоит ${money(cost)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  const r = await pool.query('UPDATE facilities SET trees_count=trees_count+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2 RETURNING *', [GARDEN.taxLimit, garden.id]);
+  await logTx(user.id, 'garden_buy_tree', -cost, 'tree');
+  await ctx.reply(`⬆️ Дерево куплено!\n\n🌳 Деревья: ${gardenTrees(r.rows[0])} шт.\n🥐 Доход: ${gameCash(gardenIncomePerHour(r.rows[0]))}`);
+});
+
+bot.action('garden_collect', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const amount = Math.floor(Number(garden.account || 0));
+  if (amount <= 0) return ctx.answerCbQuery('На счету пока пусто', { show_alert: true });
+  await pool.query('UPDATE facilities SET account=0 WHERE id=$1', [garden.id]);
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [amount, user.id]);
+  await logTx(user.id, 'garden_collect_account', amount, 'garden');
+  await ctx.reply(`💰 Собрано с сада: +${money(amount)}`);
+  return showGarden(ctx, user);
+});
+
+bot.action('garden_tax', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const debt = Math.floor(Number(garden.tax_debt || 0));
+  if (debt <= 0) return ctx.answerCbQuery('Налогов пока нет', { show_alert: true });
+  if (Number(user.foxes) < debt) return ctx.answerCbQuery(`Нужно ${debt.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [debt, user.id]);
+  await pool.query('UPDATE facilities SET tax_debt=0 WHERE id=$1', [garden.id]);
+  await logTx(user.id, 'garden_pay_tax', -debt, 'garden');
+  await ctx.reply(`🦅 Налоги сада оплачены: ${money(debt)}.`);
+  return showGarden(ctx, user);
+});
+
+bot.action('garden_tree', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const cost = gardenTreeCost(garden);
+  if (Number(user.foxes) < cost) return ctx.answerCbQuery(`Нужно ${cost.toLocaleString('ru-RU')}`, { show_alert: true });
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cost, user.id]);
+  await pool.query('UPDATE facilities SET trees_count=trees_count+1, level=level+1, tax_limit=tax_limit+$1 WHERE id=$2', [GARDEN.taxLimit, garden.id]);
+  await logTx(user.id, 'garden_buy_tree', -cost, 'tree');
+  return showGarden(ctx, user, true);
+});
+
+bot.action('garden_water', async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await requireUser(ctx);
+  const garden = await getGarden(user);
+  if (!garden) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const last = user.garden_watered_at ? new Date(user.garden_watered_at).getTime() : 0;
+  if (last && Date.now() - last < 60 * 60 * 1000) return ctx.answerCbQuery(`Полить можно через ${formatDuration(60 * 60 * 1000 - (Date.now() - last))}`, { show_alert: true });
+  const water = Math.min(GARDEN.maxWater, Number(garden.water || 0) + 35);
+  await pool.query('UPDATE facilities SET water=$1 WHERE id=$2', [water, garden.id]);
+  await pool.query('UPDATE users SET garden_watered_at=NOW() WHERE id=$1', [user.id]);
+  return showGarden(ctx, user, true);
 });
 
 bot.hears(/^зелья$/i, async (ctx) => {
@@ -620,7 +1237,7 @@ bot.hears(/^купить\s+бизнес\s+(\d+)$/i, async (ctx) => buyItem(ctx, 
 bot.hears(/^купить\s+дом\s+(\d+)$/i, async (ctx) => buyItem(ctx, 'house', houses, ctx.match[1]));
 bot.hears(/^купить\s+(машина|тачка)\s+(\d+)$/i, async (ctx) => buyItem(ctx, 'car', cars, ctx.match[2]));
 
-bot.hears(/^бизнес$/i, async (ctx) => {
+bot.hears(/^мои\s+купленные\s+бизнесы$/i, async (ctx) => {
   const user = await requireUser(ctx);
   const r = await pool.query('SELECT title, income FROM inventory WHERE user_id=$1 AND item_type=$2', [user.id, 'business']);
   if (!r.rows.length) return ctx.reply('🏢 У тебя пока нет бизнесов. Пиши: магазин');
