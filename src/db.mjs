@@ -73,6 +73,37 @@ export async function initDb() {
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
   )`);
 
+  // Clan migrations for older Railway databases. Some old builds created clans
+  // without level/bank/xp, so any query like SELECT c.level crashed.
+  await pool.query(`CREATE TABLE IF NOT EXISTS clans (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT 'Клан',
+    owner_user_id INT,
+    bank NUMERIC NOT NULL DEFAULT 0,
+    xp INT NOT NULL DEFAULT 0,
+    level INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+  await ensureColumn('clans', 'title', "TEXT NOT NULL DEFAULT 'Клан'");
+  await ensureColumn('clans', 'owner_user_id', 'INT');
+  await ensureColumn('clans', 'bank', 'NUMERIC NOT NULL DEFAULT 0');
+  await ensureColumn('clans', 'xp', 'INT NOT NULL DEFAULT 0');
+  await ensureColumn('clans', 'level', 'INT NOT NULL DEFAULT 1');
+  await ensureColumn('clans', 'created_at', 'TIMESTAMP NOT NULL DEFAULT NOW()');
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS clan_members (
+    id SERIAL PRIMARY KEY,
+    clan_id INT NOT NULL,
+    user_id INT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id)
+  )`);
+  await ensureColumn('clan_members', 'clan_id', 'INT');
+  await ensureColumn('clan_members', 'user_id', 'INT');
+  await ensureColumn('clan_members', 'role', "TEXT NOT NULL DEFAULT 'member'");
+  await ensureColumn('clan_members', 'joined_at', 'TIMESTAMP NOT NULL DEFAULT NOW()');
+
   await ensureColumn('facilities', 'video_cards', 'INT NOT NULL DEFAULT 0');
   await ensureColumn('facilities', 'max_video_cards', 'INT NOT NULL DEFAULT 10');
   await ensureColumn('facilities', 'tax_debt', 'NUMERIC NOT NULL DEFAULT 0');
