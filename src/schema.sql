@@ -77,3 +77,45 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(LOWER(username));
 CREATE INDEX IF NOT EXISTS idx_users_foxes ON users(foxes DESC);
 CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id);
+
+
+-- Feature pack: marriages, multi-cases, passive buildings, gardens and potions
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_luck_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_tree_collect_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS garden_watered_at TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS luck_potions INT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS income_boost_until TIMESTAMP;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS case_luck_until TIMESTAMP;
+
+CREATE TABLE IF NOT EXISTS marriages (
+  id SERIAL PRIMARY KEY,
+  user1_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user2_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(user1_id),
+  UNIQUE(user2_id),
+  CHECK (user1_id <> user2_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_cases (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  case_id INT NOT NULL,
+  amount INT NOT NULL DEFAULT 0,
+  UNIQUE(user_id, case_id)
+);
+
+CREATE TABLE IF NOT EXISTS facilities (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  level INT NOT NULL DEFAULT 1,
+  income NUMERIC NOT NULL DEFAULT 0,
+  title TEXT NOT NULL,
+  last_collect_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE(user_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_facilities_user_kind ON facilities(user_id, kind);
+CREATE INDEX IF NOT EXISTS idx_user_cases_user ON user_cases(user_id);

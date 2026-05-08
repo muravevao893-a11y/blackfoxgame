@@ -32,6 +32,35 @@ const cars = [
   { id: 4, title: 'Hyper Beast', price: 15000000 }
 ];
 
+const caseTypes = [
+  { id: 1, title: 'Лисий кейс', price: 25000, minFoxes: 15000, maxFoxes: 90000, crystalChance: 0.08, jackpotChance: 0.015 },
+  { id: 2, title: 'Неоновый кейс', price: 120000, minFoxes: 90000, maxFoxes: 380000, crystalChance: 0.18, jackpotChance: 0.035 },
+  { id: 3, title: 'Королевский кейс', price: 600000, minFoxes: 450000, maxFoxes: 1800000, crystalChance: 0.35, jackpotChance: 0.06 },
+  { id: 4, title: 'BFG-style кейс', price: 2500000, minFoxes: 1500000, maxFoxes: 8500000, crystalChance: 0.55, jackpotChance: 0.09 }
+];
+
+const facilityTypes = {
+  business: { title: 'Бизнес', aliases: ['бизнес', 'мой бизнес'], build: 'построить бизнес', price: 350000, income: 65000, intervalHours: 6, icon: '🗄' },
+  generator: { title: 'Генератор', aliases: ['генератор', 'мой генератор'], build: 'построить генератор', price: 750000, income: 145000, intervalHours: 6, icon: '🏭' },
+  farm: { title: 'Майнинг ферма', aliases: ['ферма', 'моя ферма'], build: 'построить ферму', price: 1400000, income: 310000, intervalHours: 8, icon: '🧰' },
+  quarry: { title: 'Карьер', aliases: ['карьер', 'мой карьер'], build: 'построить карьер', price: 2800000, income: 720000, intervalHours: 10, icon: '⚠️' },
+  tree: { title: 'Денежное дерево', aliases: ['денежное дерево', 'моё дерево', 'мое дерево'], build: 'построить участок', price: 500000, income: 90000, intervalHours: 4, icon: '🏡' },
+  garden: { title: 'Сад', aliases: ['сад', 'мой сад'], build: 'построить сад', price: 900000, income: 120000, intervalHours: 6, icon: '🌳' }
+};
+
+const magicBallAnswers = [
+  'да, но лучше без резких движений', 'нет, вселенная орет «не сегодня»', 'шансы хорошие',
+  'ответ где-то рядом, но он в отпуске', '100%, если не забьешь', 'сомнительно, но красиво',
+  'да, лис подтверждает', 'лучше спроси позже', 'нет, но можно переиграть', 'возможно, если повезет'
+];
+
+const potionTypes = [
+  { id: 1, title: 'Зелье удачи', cost: 3, effect: 'case_luck', description: 'повышает шанс джекпота в кейсах на 2 часа' },
+  { id: 2, title: 'Зелье дохода', cost: 5, effect: 'income_boost', description: 'дает +25% к пассивному доходу на 2 часа' },
+  { id: 3, title: 'Зелье азарта', cost: 7, effect: 'luck_potions', description: 'выдает 3 заряда для команды «испытать удачу»' }
+];
+
+
 function money(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${CURRENCY}`; }
 function gems(v) { return `${Number(v || 0).toLocaleString('ru-RU')} ${GEM}`; }
 function isAdmin(ctx) { return adminIds.has(ctx.from.id); }
@@ -60,6 +89,42 @@ async function findUserByMention(mention) {
   return r.rows[0];
 }
 
+async function findUserByTgId(tgId) {
+  const r = await pool.query('SELECT * FROM users WHERE tg_id = $1', [Number(tgId)]);
+  return r.rows[0];
+}
+function nowPlusHours(hours) {
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
+}
+function normalizeRu(text) {
+  return String(text || '').trim().toLowerCase().replaceAll('ё', 'е');
+}
+function formatDuration(ms) {
+  const totalMin = Math.max(1, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h ? `${h}ч ${m}м` : `${m}м`;
+}
+async function ensureFacility(user, kind) {
+  const cfg = facilityTypes[kind];
+  const r = await pool.query('SELECT * FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, kind]);
+  return { cfg, facility: r.rows[0] };
+}
+async function collectFacilityIncome(user, kind) {
+  const { cfg, facility } = await ensureFacility(user, kind);
+  if (!facility) return { cfg, facility: null, collected: 0, waitMs: 0 };
+  const last = facility.last_collect_at ? new Date(facility.last_collect_at).getTime() : new Date(facility.created_at).getTime();
+  const intervalMs = cfg.intervalHours * 60 * 60 * 1000;
+  const passed = Date.now() - last;
+  if (passed < intervalMs) return { cfg, facility, collected: 0, waitMs: intervalMs - passed };
+  const boostActive = user.income_boost_until && new Date(user.income_boost_until).getTime() > Date.now();
+  const income = Math.floor(Number(facility.income) * (boostActive ? 1.25 : 1));
+  await pool.query('UPDATE users SET foxes=foxes+$1 WHERE id=$2', [income, user.id]);
+  await pool.query('UPDATE facilities SET last_collect_at=NOW() WHERE id=$1', [facility.id]);
+  await logTx(user.id, `${kind}_collect`, income);
+  return { cfg, facility, collected: income, waitMs: 0 };
+}
+
 const helpText = `🦊 ${BOT_NAME}
 
 Валюта: ${CURRENCY}
@@ -72,26 +137,43 @@ const helpText = `🦊 ${BOT_NAME}
 реф
 передать @user сумма
 
-🎰 Развлекуха:
-казино сумма
-казино все
-казино половина
-казино инфо
+🎲 Бурмалденс-развлекуха:
+шар фраза
+выбери фраза или фраза2
+инфа фраза
+испытать удачу
+
+💒 Браки:
+свадьба ID_пользователя
+развод
+мой брак
+
+📦 Кейсы:
+кейсы
+купить кейс номер количество
+открыть кейс номер количество
+
+🎰 Игры:
+казино сумма / казино все / казино половина
 монетка сумма орел/решка
 кубик сумма
-кейс
-кейс купить
 
 🏦 Экономика:
 банк
 банк положить сумма
 банк снять сумма
 магазин
-купить бизнес 1
-купить дом 1
-купить машина 1
-бизнес
-собрать
+
+🗄 Пассивный доход:
+бизнес / мой бизнес / построить бизнес
+генератор / мой генератор / построить генератор
+ферма / моя ферма / построить ферму
+карьер / мой карьер / построить карьер
+денежное дерево / моё дерево / построить участок
+сад / мой сад / построить сад
+сад полить
+зелья
+создать зелье номер
 
 🛡 Кланы:
 клан
@@ -104,8 +186,7 @@ const helpText = `🦊 ${BOT_NAME}
 топ
 промо КОД
 
-Важно: это виртуальная игра без вывода денег.`;
-
+Важно: это виртуальная игра без вывода денег.`
 bot.start(async (ctx) => {
   const user = await requireUser(ctx);
   await ctx.reply(`🦊 Добро пожаловать в ${BOT_NAME}!
@@ -115,6 +196,204 @@ bot.start(async (ctx) => {
 });
 
 bot.hears(/^(помощь|help|меню)$/i, async (ctx) => { await requireUser(ctx); await ctx.reply(helpText); });
+
+// ===== Burmaldance entertainment pack =====
+bot.hears(/^шар\s+(.{1,300})$/i, async (ctx) => {
+  await requireUser(ctx);
+  const q = ctx.match[1].trim();
+  const answer = magicBallAnswers[randInt(0, magicBallAnswers.length - 1)];
+  await ctx.reply(`🔮 Шар думает над: «${q}»\n\nОтвет: ${answer}.`);
+});
+
+bot.hears(/^выбери\s+(.+)\s+или\s+(.+)$/i, async (ctx) => {
+  await requireUser(ctx);
+  const a = ctx.match[1].trim();
+  const b = ctx.match[2].trim();
+  const choice = Math.random() < 0.5 ? a : b;
+  await ctx.reply(`💬 Я выбираю: ${choice}`);
+});
+
+bot.hears(/^инфа\s+(.{1,300})$/i, async (ctx) => {
+  await requireUser(ctx);
+  const percent = randInt(0, 100);
+  await ctx.reply(`📊 Инфа по «${ctx.match[1].trim()}»: ${percent}%`);
+});
+
+bot.hears(/^испытать\s+удачу$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const now = Date.now();
+  const last = user.last_luck_at ? new Date(user.last_luck_at).getTime() : 0;
+  const hasPotion = Number(user.luck_potions || 0) > 0;
+  if (!hasPotion && last && now - last < 60 * 60 * 1000) {
+    return ctx.reply(`🍀 Удачу можно испытывать раз в час. Осталось: ${formatDuration(60 * 60 * 1000 - (now - last))}`);
+  }
+  const r = Math.random();
+  let reward = 0;
+  let crystals = 0;
+  let text = 'обычная удача';
+  if (r < 0.05) { reward = randInt(250000, 900000); crystals = randInt(1, 5); text = 'джекпот удачи'; }
+  else if (r < 0.35) { reward = randInt(50000, 180000); text = 'хороший занос'; }
+  else if (r < 0.75) { reward = randInt(5000, 35000); text = 'маленький плюс'; }
+  else { reward = -randInt(3000, 25000); text = 'удача решила пошутить'; }
+  const potionSql = hasPotion ? ', luck_potions = luck_potions - 1' : ', last_luck_at = NOW()';
+  await pool.query(`UPDATE users SET foxes = GREATEST(0, foxes + $1), crystals = crystals + $2 ${potionSql} WHERE id=$3`, [reward, crystals, user.id]);
+  await logTx(user.id, 'luck_test', reward, text);
+  await ctx.reply(`🍀 Испытание удачи: ${text}\n\n${reward >= 0 ? '+' : '-'}${money(Math.abs(reward))}${crystals ? `\n+${gems(crystals)}` : ''}${hasPotion ? '\n\n🧪 Потрачен заряд зелья азарта.' : ''}`);
+});
+
+// ===== Marriages =====
+bot.hears(/^свадьба\s+(\d+)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const target = await findUserByTgId(ctx.match[1]);
+  if (!target) return ctx.reply('💔 Игрок не найден. Он должен хотя бы раз запустить бота.');
+  if (target.id === user.id) return ctx.reply('💔 Сам с собой? Лис такое не регистрирует.');
+  const busy = await pool.query('SELECT id FROM marriages WHERE user1_id IN ($1,$2) OR user2_id IN ($1,$2)', [user.id, target.id]);
+  if (busy.rows.length) return ctx.reply('💔 Кто-то из вас уже состоит в браке. Сначала развод.');
+  const price = 100000;
+  if (Number(user.foxes) < price) return ctx.reply(`💒 Свадьба стоит ${money(price)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [price, user.id]);
+  await pool.query('INSERT INTO marriages (user1_id, user2_id) VALUES ($1,$2)', [user.id, target.id]);
+  await logTx(user.id, 'marriage', -price, String(target.tg_id));
+  await ctx.reply(`💖 Свадьба состоялась!\n\n${ctx.from.first_name} теперь в браке с ${target.first_name || target.username || target.tg_id}.`);
+});
+
+bot.hears(/^развод$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const r = await pool.query('DELETE FROM marriages WHERE user1_id=$1 OR user2_id=$1 RETURNING *', [user.id]);
+  if (!r.rows.length) return ctx.reply('💌 У тебя нет брака. Разводиться не с кем.');
+  await ctx.reply('💔 Развод оформлен. Свобода, но с привкусом грусти.');
+});
+
+bot.hears(/^(мой\s+брак|моя\s+свадьба)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const r = await pool.query(`SELECT m.*, u1.first_name a_name, u1.username a_user, u1.tg_id a_tg, u2.first_name b_name, u2.username b_user, u2.tg_id b_tg
+    FROM marriages m JOIN users u1 ON u1.id=m.user1_id JOIN users u2 ON u2.id=m.user2_id
+    WHERE m.user1_id=$1 OR m.user2_id=$1`, [user.id]);
+  if (!r.rows.length) return ctx.reply('💌 Ты пока не в браке. Команда: свадьба ID');
+  const m = r.rows[0];
+  const partner = m.user1_id === user.id ? { name: m.b_name, username: m.b_user, tg: m.b_tg } : { name: m.a_name, username: m.a_user, tg: m.a_tg };
+  await ctx.reply(`💌 Твой брак\n\nПартнер: ${partner.username ? '@' + partner.username : partner.name || partner.tg}\nДата: ${new Date(m.created_at).toLocaleString('ru-RU')}`);
+});
+
+// ===== Multi-case system =====
+bot.hears(/^кейсы$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const inv = await pool.query('SELECT case_id, amount FROM user_cases WHERE user_id=$1 AND amount>0', [user.id]);
+  const owned = Object.fromEntries(inv.rows.map(x => [x.case_id, x.amount]));
+  const list = caseTypes.map(c => `${c.id}. ${c.title} — ${money(c.price)} | у тебя: ${owned[c.id] || 0}`).join('\n');
+  await ctx.reply(`📦 Кейсы\n\n${list}\n\nКоманды:\nкупить кейс 1 5\nоткрыть кейс 1 5`);
+});
+
+bot.hears(/^купить\s+кейс\s+(\d+)\s*(\d+)?$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const caseId = Number(ctx.match[1]);
+  const amount = Math.min(100, Math.max(1, Number(ctx.match[2] || 1)));
+  const c = caseTypes.find(x => x.id === caseId);
+  if (!c) return ctx.reply('❌ Такого кейса нет. Пиши: кейсы');
+  const total = c.price * amount;
+  if (Number(user.foxes) < total) return ctx.reply(`❌ Не хватает ${CURRENCY}. Нужно: ${money(total)}`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [total, user.id]);
+  await pool.query(`INSERT INTO user_cases (user_id, case_id, amount) VALUES ($1,$2,$3)
+    ON CONFLICT (user_id, case_id) DO UPDATE SET amount=user_cases.amount+$3`, [user.id, c.id, amount]);
+  await ctx.reply(`🛒 Куплено: ${c.title} x${amount}\nЦена: ${money(total)}`);
+});
+
+bot.hears(/^открыть\s+кейс\s+(\d+)\s*(\d+)?$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const caseId = Number(ctx.match[1]);
+  const amount = Math.min(50, Math.max(1, Number(ctx.match[2] || 1)));
+  const c = caseTypes.find(x => x.id === caseId);
+  if (!c) return ctx.reply('❌ Такого кейса нет. Пиши: кейсы');
+  const own = await pool.query('SELECT amount FROM user_cases WHERE user_id=$1 AND case_id=$2', [user.id, caseId]);
+  if (!own.rows.length || Number(own.rows[0].amount) < amount) return ctx.reply(`❌ У тебя нет столько кейсов. Пиши: кейсы`);
+  const lucky = user.case_luck_until && new Date(user.case_luck_until).getTime() > Date.now();
+  let totalFoxes = 0;
+  let totalCrystals = 0;
+  let jackpots = 0;
+  for (let i = 0; i < amount; i++) {
+    const jackpotChance = c.jackpotChance + (lucky ? 0.04 : 0);
+    if (Math.random() < jackpotChance) {
+      jackpots++;
+      totalFoxes += randInt(c.maxFoxes, c.maxFoxes * 4);
+      totalCrystals += randInt(2, 12);
+    } else {
+      totalFoxes += randInt(c.minFoxes, c.maxFoxes);
+      if (Math.random() < c.crystalChance) totalCrystals += randInt(1, 4);
+    }
+  }
+  await pool.query('UPDATE user_cases SET amount=amount-$1 WHERE user_id=$2 AND case_id=$3', [amount, user.id, caseId]);
+  await pool.query('UPDATE users SET foxes=foxes+$1, crystals=crystals+$2 WHERE id=$3', [totalFoxes, totalCrystals, user.id]);
+  await logTx(user.id, 'open_cases', totalFoxes, `${c.title} x${amount}`);
+  await ctx.reply(`🔐 Открыто: ${c.title} x${amount}\n\n+${money(totalFoxes)}\n+${gems(totalCrystals)}${jackpots ? `\n\n💥 Джекпотов: ${jackpots}` : ''}${lucky ? '\n🧪 Работало зелье удачи.' : ''}`);
+});
+
+// ===== Passive buildings =====
+bot.hears(/^(построить\s+бизнес|построить\s+генератор|построить\s+ферму|построить\s+карьер|построить\s+участок|построить\s+сад)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const cmd = normalizeRu(ctx.match[1]);
+  const entry = Object.entries(facilityTypes).find(([, cfg]) => normalizeRu(cfg.build) === cmd);
+  if (!entry) return;
+  const [kind, cfg] = entry;
+  const exists = await pool.query('SELECT id FROM facilities WHERE user_id=$1 AND kind=$2', [user.id, kind]);
+  if (exists.rows.length) return ctx.reply(`${cfg.icon} У тебя уже построен ${cfg.title}. Пиши: ${cfg.aliases[0]}`);
+  if (Number(user.foxes) < cfg.price) return ctx.reply(`❌ Не хватает ${CURRENCY}. Постройка стоит ${money(cfg.price)}.`);
+  await pool.query('UPDATE users SET foxes=foxes-$1 WHERE id=$2', [cfg.price, user.id]);
+  await pool.query('INSERT INTO facilities (user_id, kind, title, income, last_collect_at) VALUES ($1,$2,$3,$4,NOW())', [user.id, kind, cfg.title, cfg.income]);
+  await logTx(user.id, `build_${kind}`, -cfg.price, cfg.title);
+  await ctx.reply(`${cfg.icon} Построено: ${cfg.title}\n\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
+});
+
+bot.hears(/^(мой\s+бизнес|бизнес|мой\s+генератор|генератор|моя\s+ферма|ферма|мой\s+карьер|карьер|денежное\s+дерево|мое\s+дерево|моё\s+дерево|мой\s+сад|сад)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const text = normalizeRu(ctx.match[1]);
+  const entry = Object.entries(facilityTypes).find(([, cfg]) => cfg.aliases.map(normalizeRu).includes(text));
+  if (!entry) return;
+  const [kind, cfg] = entry;
+  const res = await collectFacilityIncome(user, kind);
+  if (!res.facility) return ctx.reply(`${cfg.icon} ${cfg.title} еще не построен.\n\nКоманда: ${cfg.build}\nЦена: ${money(cfg.price)}\nДоход: ${money(cfg.income)} раз в ${cfg.intervalHours}ч`);
+  await ctx.reply(`${cfg.icon} ${cfg.title}\n\nУровень: ${res.facility.level}\nДоход: ${money(res.facility.income)} раз в ${cfg.intervalHours}ч\n${res.collected ? `\n💰 Собрано: +${money(res.collected)}` : `\n⏳ Следующий сбор через: ${formatDuration(res.waitMs)}`}`);
+});
+
+bot.hears(/^продать\s+(бизнес|генератор|ферму|ферма|карьер|участок|сад)$/i, async (ctx) => {
+  await requireUser(ctx);
+  await ctx.reply('💰 Продажа временно недоступна. Позже можно будет включить выкуп за часть цены.');
+});
+
+// ===== Garden and potions =====
+bot.hears(/^сад\s+полить$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const { facility } = await ensureFacility(user, 'garden');
+  if (!facility) return ctx.reply('🌳 Сначала построй сад: построить сад');
+  const last = user.garden_watered_at ? new Date(user.garden_watered_at).getTime() : 0;
+  if (last && Date.now() - last < 3 * 60 * 60 * 1000) return ctx.reply(`💦 Сад уже полит. Следующий полив через ${formatDuration(3 * 60 * 60 * 1000 - (Date.now() - last))}.`);
+  const reward = randInt(1, 3);
+  await pool.query('UPDATE users SET garden_watered_at=NOW(), crystals=crystals+$1 WHERE id=$2', [reward, user.id]);
+  await ctx.reply(`💦 Сад полит. Цветочки довольны.\n\n+${gems(reward)} для зелий.`);
+});
+
+bot.hears(/^зелья$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const list = potionTypes.map(p => `${p.id}. ${p.title} — ${p.cost} ${GEM}\n   ${p.description}`).join('\n');
+  await ctx.reply(`🍸 Зелья\n\n${list}\n\nУ тебя: ${gems(user.crystals)}\nКоманда: создать зелье 1`);
+});
+
+bot.hears(/^создать\s+зелье\s+(\d+)$/i, async (ctx) => {
+  const user = await requireUser(ctx);
+  const potion = potionTypes.find(p => p.id === Number(ctx.match[1]));
+  if (!potion) return ctx.reply('❌ Такого зелья нет. Пиши: зелья');
+  const { facility } = await ensureFacility(user, 'garden');
+  if (!facility) return ctx.reply('🌳 Для зелий нужен сад. Команда: построить сад');
+  if (Number(user.crystals) < potion.cost) return ctx.reply(`❌ Нужно ${potion.cost} ${GEM}.`);
+  if (potion.effect === 'case_luck') {
+    await pool.query('UPDATE users SET crystals=crystals-$1, case_luck_until=$2 WHERE id=$3', [potion.cost, nowPlusHours(2), user.id]);
+  } else if (potion.effect === 'income_boost') {
+    await pool.query('UPDATE users SET crystals=crystals-$1, income_boost_until=$2 WHERE id=$3', [potion.cost, nowPlusHours(2), user.id]);
+  } else {
+    await pool.query('UPDATE users SET crystals=crystals-$1, luck_potions=luck_potions+3 WHERE id=$2', [potion.cost, user.id]);
+  }
+  await ctx.reply(`🔮 Создано: ${potion.title}\nЭффект: ${potion.description}`);
+});
+
 
 bot.hears(/^(баланс|профиль|profile)$/i, async (ctx) => {
   const user = await requireUser(ctx);
